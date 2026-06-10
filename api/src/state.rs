@@ -55,6 +55,7 @@ impl AppState {
 
         let pool = PgPoolOptions::new()
             .max_connections(10)
+            .acquire_timeout(config.database_acquire_timeout)
             .connect_lazy(&config.database_url)?;
 
         let http = reqwest::Client::builder()

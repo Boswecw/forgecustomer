@@ -45,8 +45,10 @@ Outbox behavior:
 - Retry uses deterministic backoff and eventually dead-letters exhausted events.
 - Delivery keys must make repeated publishes idempotent downstream.
 
-Live emit sites: `subscription_changed` (webhook processing), `installation_registered`
-(first registration), and `license_activated` (successful activation).
+Live emit sites: `subscription_changed` (webhook processing and admin resync, when the
+projection changed), `installation_registered` (first registration), `license_activated`
+(successful activation), `license_revoked` (admin revocation), and `customer_suspended` /
+`customer_restored` (admin status changes).
 
 ### Event payload hygiene
 

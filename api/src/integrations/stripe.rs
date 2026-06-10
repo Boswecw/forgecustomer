@@ -101,6 +101,7 @@ pub fn build_checkout_session_form(request: &CheckoutSessionRequest) -> Vec<(Str
 
 pub async fn create_checkout_session(
     http: &reqwest::Client,
+    api_base: &str,
     secret_key: &str,
     request: &CheckoutSessionRequest,
     idempotency_key: Option<&str>,
@@ -111,7 +112,10 @@ pub async fn create_checkout_session(
 
     let form = build_checkout_session_form(request);
     let mut builder = http
-        .post("https://api.stripe.com/v1/checkout/sessions")
+        .post(format!(
+            "{}/v1/checkout/sessions",
+            api_base.trim_end_matches('/')
+        ))
         .bearer_auth(secret_key)
         .form(&form);
 
@@ -251,6 +255,73 @@ fn subscription_price_id(value: &Value) -> Option<String> {
         })
 }
 
+/// Extract a normalized subscription change from a Stripe subscription object — the same
+/// shape arrives in webhook `data.object` payloads and `GET /v1/subscriptions/{id}`
+/// responses, so webhook processing and admin resync share this extraction.
+fn subscription_change_from_object(
+    object: &Value,
+    default_status: &str,
+) -> Option<StripeSubscriptionChange> {
+    let raw_status = string_field(object, "status").unwrap_or_else(|| default_status.to_string());
+    Some(StripeSubscriptionChange {
+        stripe_subscription_id: string_field(object, "id")?,
+        stripe_customer_id: string_field(object, "customer"),
+        customer_id: metadata_uuid(object, "forgecustomer_customer_id"),
+        plan_version_id: metadata_uuid(object, "plan_version_id"),
+        stripe_price_id: subscription_price_id(object),
+        status: normalize_stripe_status(&raw_status),
+        current_period_start: unix_seconds(integer_field(object, "current_period_start")),
+        current_period_end: unix_seconds(integer_field(object, "current_period_end")),
+        cancel_at_period_end: bool_field(object, "cancel_at_period_end").unwrap_or(false),
+    })
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SubscriptionFetchError {
+    #[error("Stripe secret key is not configured")]
+    NotConfigured,
+    #[error("Stripe transport error: {0}")]
+    Transport(String),
+    #[error("Stripe subscriptions API returned status {0}")]
+    ApiStatus(u16),
+    #[error("Stripe subscription response was missing required fields")]
+    MalformedResponse,
+}
+
+/// Fetch current subscription truth from Stripe (admin resync path). Unknown statuses
+/// fail closed to `incomplete` via the shared normalization.
+pub async fn fetch_subscription(
+    http: &reqwest::Client,
+    api_base: &str,
+    secret_key: &str,
+    stripe_subscription_id: &str,
+) -> Result<StripeSubscriptionChange, SubscriptionFetchError> {
+    if secret_key.is_empty() {
+        return Err(SubscriptionFetchError::NotConfigured);
+    }
+
+    let response = http
+        .get(format!(
+            "{}/v1/subscriptions/{stripe_subscription_id}",
+            api_base.trim_end_matches('/')
+        ))
+        .bearer_auth(secret_key)
+        .send()
+        .await
+        .map_err(|error| SubscriptionFetchError::Transport(error.to_string()))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(SubscriptionFetchError::ApiStatus(status.as_u16()));
+    }
+
+    let object: Value = response
+        .json()
+        .await
+        .map_err(|error| SubscriptionFetchError::Transport(error.to_string()))?;
+    subscription_change_from_object(&object, "incomplete")
+        .ok_or(SubscriptionFetchError::MalformedResponse)
+}
+
 fn invoice_status(event_type: &str, object: &Value) -> String {
     let raw = string_field(object, "status").unwrap_or_else(|| match event_type {
         "invoice.paid" => "paid".to_string(),
@@ -331,24 +402,12 @@ impl ParsedStripeEvent {
         ) {
             return None;
         }
-        let raw_status = string_field(&self.object, "status").unwrap_or_else(|| {
-            if self.event_type == "customer.subscription.deleted" {
-                "canceled".to_string()
-            } else {
-                "incomplete".to_string()
-            }
-        });
-        Some(StripeSubscriptionChange {
-            stripe_subscription_id: string_field(&self.object, "id")?,
-            stripe_customer_id: string_field(&self.object, "customer"),
-            customer_id: metadata_uuid(&self.object, "forgecustomer_customer_id"),
-            plan_version_id: metadata_uuid(&self.object, "plan_version_id"),
-            stripe_price_id: subscription_price_id(&self.object),
-            status: normalize_stripe_status(&raw_status),
-            current_period_start: unix_seconds(integer_field(&self.object, "current_period_start")),
-            current_period_end: unix_seconds(integer_field(&self.object, "current_period_end")),
-            cancel_at_period_end: bool_field(&self.object, "cancel_at_period_end").unwrap_or(false),
-        })
+        let default_status = if self.event_type == "customer.subscription.deleted" {
+            "canceled"
+        } else {
+            "incomplete"
+        };
+        subscription_change_from_object(&self.object, default_status)
     }
 
     pub fn invoice_change(&self) -> Option<StripeInvoiceChange> {

@@ -82,6 +82,10 @@ Implemented today:
   canonical signing order.
 - Advisory feature/quota checks and signed offline-lease issuance (`forge.lease.v1`)
   for activated installations, denied for suspended/revoked contexts.
+- The Forge Command admin surface: customer lookup, suspend/restore, Stripe subscription
+  resync, operator license issue/revoke, entitlement overrides, compensating usage
+  adjustments, and audit reads — mutations role-gated (`admin`), reason-required, and
+  audited with the operator as actor.
 - Public product and plan catalog endpoints backed by SQLx repositories.
 - Customer and admin JWT extraction boundaries.
 - Public entitlement key endpoint and Ed25519 signing/key-ring services.
@@ -96,8 +100,7 @@ Implemented today:
 Still pending before AuthorForge can rely on the service end to end:
 
 - Usage reserve/commit/release/current endpoint wiring.
-- Admin handler implementations (including license revocation).
-- Remaining outbox emit sites and deletion workflow endpoints.
+- Deletion workflow endpoints and the anonymization outbox emit.
 
 The router intentionally returns `NOT_IMPLEMENTED` for many protected handlers while
 still enforcing the correct auth boundary. That is a security feature of the current
@@ -360,9 +363,15 @@ Current route surface:
 - `POST /v1/admin/usage/adjust`
 - `GET /v1/admin/audit`
 
-Admin handlers are intentionally pending. Each eventual admin mutation must require a
-reason, write commercial audit, preserve append-only ledgers, and use compensating events
-for corrections.
+The admin surface is implemented and is the Forge Command integration point. Reads
+require any valid operator token; mutations require the `admin` role and a written
+reason, write operator-actor commercial audit, preserve append-only ledgers (usage
+corrections are compensating `adjustment` events behind a required idempotency key), and
+queue the contract-defined outbox events (`customer_suspended`, `customer_restored`,
+`license_revoked`). Subscription resync pulls current truth from the Stripe API,
+reprojects it, syncs the linked license, and advances the event watermark so stale
+out-of-order webhooks are subsequently skipped. Suspend/restore and revoke are
+idempotent and report `changed: false` on replay.
 
 ### Error contract
 
@@ -653,8 +662,10 @@ Outbox behavior:
 - Retry uses deterministic backoff and eventually dead-letters exhausted events.
 - Delivery keys must make repeated publishes idempotent downstream.
 
-Live emit sites: `subscription_changed` (webhook processing), `installation_registered`
-(first registration), and `license_activated` (successful activation).
+Live emit sites: `subscription_changed` (webhook processing and admin resync, when the
+projection changed), `installation_registered` (first registration), `license_activated`
+(successful activation), `license_revoked` (admin revocation), and `customer_suspended` /
+`customer_restored` (admin status changes).
 
 ### Event payload hygiene
 
@@ -887,6 +898,11 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
   stable, sign/verify/tamper roundtrip).
 - Entitlement snapshot, check, and offline-lease routes fail closed without auth; the
   keys endpoint stays public.
+- Admin input validation: reason bounds, device-limit bounds, adjustment amount
+  (finite/non-zero/bounded), period-key shape and window, typed override values.
+- Admin role boundary: operator tokens without the `admin` role are rejected (403) on
+  every mutation; reads pass; reason validation rejects before any database write; usage
+  adjustments without an idempotency key are rejected.
 - Stripe webhook signature, parsing, missing/bad signature, and malformed signed-envelope
   rejection behavior.
 - Customer token cannot access admin route.
@@ -906,11 +922,9 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 These are intentional MVP gaps and should not be hidden by documentation:
 
 - Usage reserve/commit/release/current route wiring.
-- Admin handler implementations (including license revocation).
-- Deletion workflow endpoints.
-- Remaining outbox emit sites from the still-pending mutations.
+- Deletion workflow endpoints and the anonymization outbox emit.
 - End-to-end suites with live or mocked Stripe/Supabase/DataForge flows (including
-  DB-backed proofs for device-limit, revocation, snapshot, and lease paths).
+  DB-backed proofs for device-limit, revocation, snapshot, lease, and admin paths).
 
 ### Release standard
 

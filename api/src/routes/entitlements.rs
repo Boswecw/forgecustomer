@@ -39,7 +39,7 @@ pub struct SnapshotQuery {
     installation_id: Option<String>,
 }
 
-fn clean_product_key(value: Option<&str>) -> AppResult<String> {
+pub(crate) fn clean_product_key(value: Option<&str>) -> AppResult<String> {
     let value = match value.map(str::trim) {
         Some(v) if !v.is_empty() => v,
         _ => return Ok("authorforge".to_string()),

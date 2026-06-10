@@ -39,6 +39,10 @@ Implemented today:
   canonical signing order.
 - Advisory feature/quota checks and signed offline-lease issuance (`forge.lease.v1`)
   for activated installations, denied for suspended/revoked contexts.
+- The Forge Command admin surface: customer lookup, suspend/restore, Stripe subscription
+  resync, operator license issue/revoke, entitlement overrides, compensating usage
+  adjustments, and audit reads — mutations role-gated (`admin`), reason-required, and
+  audited with the operator as actor.
 - Public product and plan catalog endpoints backed by SQLx repositories.
 - Customer and admin JWT extraction boundaries.
 - Public entitlement key endpoint and Ed25519 signing/key-ring services.
@@ -53,8 +57,7 @@ Implemented today:
 Still pending before AuthorForge can rely on the service end to end:
 
 - Usage reserve/commit/release/current endpoint wiring.
-- Admin handler implementations (including license revocation).
-- Remaining outbox emit sites and deletion workflow endpoints.
+- Deletion workflow endpoints and the anonymization outbox emit.
 
 The router intentionally returns `NOT_IMPLEMENTED` for many protected handlers while
 still enforcing the correct auth boundary. That is a security feature of the current

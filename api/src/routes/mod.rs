@@ -1,8 +1,9 @@
 //! HTTP routing. Public routes need no auth; customer routes resolve a [`CustomerContext`];
-//! admin routes resolve an [`AdminContext`] validated against the separate operator issuer.
+//! admin routes resolve an [`AdminContext`] validated against the separate operator issuer
+//! (Forge Command), with mutations additionally gated on the `admin` operator role.
 //!
-//! Handlers whose full behavior depends on remaining MVP wiring (usage and admin flows)
-//! return `NOT_IMPLEMENTED` but still enforce the correct auth boundary, so the security
+//! Handlers whose full behavior depends on remaining MVP wiring (usage flows) return
+//! `NOT_IMPLEMENTED` but still enforce the correct auth boundary, so the security
 //! contract is testable today.
 
 pub mod catalog;
@@ -19,20 +20,25 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::auth::{AdminContext, AuthUserContext, CustomerContext};
+use crate::domain::admin::{
+    clean_adjustment_amount, clean_device_limit, clean_override_value, clean_period_key,
+    clean_reason,
+};
 use crate::domain::checkout::{validate_checkout_input, CheckoutInput};
 use crate::domain::customer::{
     normalize_email_claim, validate_provision_profile, ProvisionProfileInput,
 };
+use crate::domain::entitlement::clean_entitlement_key;
 use crate::domain::installation::{clean_app_version, validate_registration, RegistrationInput};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::integrations::stripe::{
-    create_checkout_session, parse_event, verify_signature, CheckoutError, CheckoutSessionRequest,
-    WebhookError,
+    create_checkout_session, fetch_subscription, parse_event, verify_signature, CheckoutError,
+    CheckoutSessionRequest, SubscriptionFetchError, WebhookError,
 };
 use crate::middleware as mw;
 use crate::repositories::commerce::{StripeWebhookApplyError, StripeWebhookRecordOutcome};
 use crate::repositories::licensing::{self, ActivationError, RegistrationError};
-use crate::repositories::{commerce, customers};
+use crate::repositories::{admin, commerce, customers};
 use crate::state::AppState;
 
 /// Assemble the full application router.
@@ -559,6 +565,7 @@ async fn checkout_create(
 
     let stripe_session = create_checkout_session(
         &state.http,
+        &state.config.stripe_api_base,
         &state.config.stripe_secret_key,
         &CheckoutSessionRequest {
             price_id: stripe_price_id.to_string(),
@@ -627,32 +634,444 @@ async fn stripe_webhook(
     }))
 }
 
-// --- Admin endpoints (auth enforced via AdminContext) ----------------------
+// --- Admin endpoints (Forge Command surface; auth via AdminContext) --------
+//
+// Reads require any valid operator token; mutations additionally require the `admin`
+// operator role and a written reason that lands in commercial audit.
 
-async fn admin_customers(_admin: AdminContext) -> AppResult<Json<Value>> {
-    Err(pending("Admin customer listing"))
+fn admin_validation_error(error: crate::domain::admin::AdminValidationError) -> AppError {
+    AppError::validation(error.message).with_details(json!({ "field": error.field }))
 }
-async fn admin_suspend(_admin: AdminContext) -> AppResult<Json<Value>> {
-    Err(pending("Admin suspend"))
+
+fn admin_error(error: admin::AdminError) -> AppError {
+    match error {
+        admin::AdminError::CustomerNotFound => AppError::not_found("Customer not found."),
+        admin::AdminError::ProductNotFound => AppError::not_found("Unknown or inactive product."),
+        admin::AdminError::LicenseNotFound => AppError::not_found("License not found."),
+        admin::AdminError::MeterNotFound => AppError::not_found("Unknown usage meter."),
+        admin::AdminError::Db(error) => error.into(),
+    }
 }
-async fn admin_restore(_admin: AdminContext) -> AppResult<Json<Value>> {
-    Err(pending("Admin restore"))
+
+fn subscription_fetch_error(error: SubscriptionFetchError) -> AppError {
+    match error {
+        SubscriptionFetchError::NotConfigured => {
+            AppError::new(ErrorCode::Internal, "Stripe API access is not configured.")
+        }
+        SubscriptionFetchError::ApiStatus(404) => {
+            AppError::not_found("Stripe no longer knows this subscription.")
+        }
+        SubscriptionFetchError::ApiStatus(_) | SubscriptionFetchError::Transport(_) => {
+            AppError::new(
+                ErrorCode::ServiceUnavailable,
+                "Stripe is currently unavailable for resync.",
+            )
+            .with_details(json!({ "reason": error.to_string() }))
+        }
+        SubscriptionFetchError::MalformedResponse => {
+            AppError::internal("Stripe returned an unusable subscription payload.")
+        }
+    }
 }
-async fn admin_resync(_admin: AdminContext) -> AppResult<Json<Value>> {
-    Err(pending("Admin subscription resync"))
+
+fn parse_rfc3339(
+    value: Option<&str>,
+    field: &'static str,
+) -> AppResult<Option<chrono::DateTime<chrono::Utc>>> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(raw) => chrono::DateTime::parse_from_rfc3339(raw)
+            .map(|value| Some(value.with_timezone(&chrono::Utc)))
+            .map_err(|_| {
+                AppError::validation("must be an RFC 3339 timestamp")
+                    .with_details(json!({ "field": field }))
+            }),
+        None => Ok(None),
+    }
 }
-async fn admin_issue_license(_admin: AdminContext) -> AppResult<Json<Value>> {
-    Err(pending("Admin license issuance"))
+
+#[derive(Debug, Default, Deserialize)]
+struct AdminCustomersQuery {
+    email: Option<String>,
+    status: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
 }
-async fn admin_revoke_license(_admin: AdminContext) -> AppResult<Json<Value>> {
-    Err(pending("Admin license revocation"))
+
+async fn admin_customers(
+    _admin: AdminContext,
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<AdminCustomersQuery>,
+) -> AppResult<Json<Value>> {
+    let email = match query.email.as_deref().map(str::trim) {
+        Some(value) if !value.is_empty() => {
+            if value.len() > 320 || !value.contains('@') {
+                return Err(AppError::validation("must be an email address")
+                    .with_details(json!({ "field": "email" })));
+            }
+            Some(value)
+        }
+        _ => None,
+    };
+    let status = match query.status.as_deref().map(str::trim) {
+        Some(value) if !value.is_empty() => {
+            if !matches!(
+                value,
+                "pending" | "active" | "suspended" | "closed" | "anonymized"
+            ) {
+                return Err(AppError::validation("unknown customer status")
+                    .with_details(json!({ "field": "status" })));
+            }
+            Some(value)
+        }
+        _ => None,
+    };
+    let limit = query.limit.unwrap_or(25).clamp(1, 100);
+    let offset = query.offset.unwrap_or(0).clamp(0, 100_000);
+
+    let customers = admin::list_customers(
+        &state.pool,
+        admin::CustomerFilter {
+            email,
+            status,
+            limit,
+            offset,
+        },
+    )
+    .await?;
+    Ok(Json(json!({ "customers": customers })))
 }
-async fn admin_override(_admin: AdminContext) -> AppResult<Json<Value>> {
-    Err(pending("Admin entitlement override"))
+
+#[derive(Debug, Deserialize)]
+struct AdminReasonRequest {
+    reason: String,
 }
-async fn admin_usage_adjust(_admin: AdminContext) -> AppResult<Json<Value>> {
-    Err(pending("Admin usage adjustment"))
+
+async fn admin_suspend(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    Path(id): Path<String>,
+    Json(request): Json<AdminReasonRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    let customer_id = parse_path_id(&id)?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+
+    let outcome = admin::suspend_customer(
+        &state.pool,
+        &operator.operator_id,
+        customer_id,
+        &reason,
+        correlation_id(&correlation),
+    )
+    .await
+    .map_err(admin_error)?;
+    Ok(Json(json!({
+        "customer_id": outcome.customer_id,
+        "from_status": outcome.from_status,
+        "status": outcome.status,
+        "changed": outcome.changed,
+    })))
 }
-async fn admin_audit(_admin: AdminContext) -> AppResult<Json<Value>> {
-    Err(pending("Admin audit read"))
+
+async fn admin_restore(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    Path(id): Path<String>,
+    Json(request): Json<AdminReasonRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    let customer_id = parse_path_id(&id)?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+
+    let outcome = admin::restore_customer(
+        &state.pool,
+        &operator.operator_id,
+        customer_id,
+        &reason,
+        correlation_id(&correlation),
+    )
+    .await
+    .map_err(admin_error)?;
+    Ok(Json(json!({
+        "customer_id": outcome.customer_id,
+        "from_status": outcome.from_status,
+        "status": outcome.status,
+        "changed": outcome.changed,
+    })))
+}
+
+async fn admin_resync(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    Path(id): Path<String>,
+    Json(request): Json<AdminReasonRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    let subscription_id = parse_path_id(&id)?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+
+    let target = commerce::find_subscription_for_resync(&state.pool, subscription_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Subscription not found."))?;
+    let change = fetch_subscription(
+        &state.http,
+        &state.config.stripe_api_base,
+        &state.config.stripe_secret_key,
+        &target.stripe_subscription_id,
+    )
+    .await
+    .map_err(subscription_fetch_error)?;
+
+    let outcome = commerce::apply_admin_resync(
+        &state.pool,
+        target.id,
+        &change,
+        &operator.operator_id,
+        &reason,
+        correlation_id(&correlation),
+    )
+    .await
+    .map_err(stripe_webhook_apply_error)?
+    .ok_or_else(|| AppError::not_found("Subscription not found."))?;
+
+    Ok(Json(json!({
+        "subscription_id": outcome.subscription_id,
+        "customer_id": outcome.customer_id,
+        "status": outcome.status,
+        "changed": outcome.changed,
+        "license_change": outcome.license_change,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminIssueLicenseRequest {
+    customer_id: String,
+    product_key: Option<String>,
+    device_limit: Option<i64>,
+    expires_at: Option<String>,
+    reason: String,
+}
+
+async fn admin_issue_license(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    Json(request): Json<AdminIssueLicenseRequest>,
+) -> AppResult<Json<admin::IssuedLicenseRow>> {
+    operator.require_role("admin")?;
+    let customer_id = Uuid::parse_str(request.customer_id.trim()).map_err(|_| {
+        AppError::validation("must be a UUID").with_details(json!({ "field": "customer_id" }))
+    })?;
+    let product_key = entitlements::clean_product_key(request.product_key.as_deref())?;
+    let device_limit = clean_device_limit(request.device_limit).map_err(admin_validation_error)?;
+    let expires_at = parse_rfc3339(request.expires_at.as_deref(), "expires_at")?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+
+    let license = admin::issue_license(
+        &state.pool,
+        admin::IssueLicenseInput {
+            operator_id: &operator.operator_id,
+            customer_id,
+            product_key: &product_key,
+            device_limit,
+            expires_at,
+            reason: &reason,
+            correlation_id: correlation_id(&correlation),
+        },
+    )
+    .await
+    .map_err(admin_error)?;
+    Ok(Json(license))
+}
+
+async fn admin_revoke_license(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    Path(id): Path<String>,
+    Json(request): Json<AdminReasonRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    let license_id = parse_path_id(&id)?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+
+    let outcome = admin::revoke_license(
+        &state.pool,
+        &operator.operator_id,
+        license_id,
+        &reason,
+        correlation_id(&correlation),
+    )
+    .await
+    .map_err(admin_error)?;
+    Ok(Json(json!({
+        "license_id": outcome.license_id,
+        "customer_id": outcome.customer_id,
+        "status": outcome.status,
+        "changed": outcome.changed,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminOverrideRequest {
+    customer_id: String,
+    product_key: Option<String>,
+    feature_key: Option<String>,
+    quota_key: Option<String>,
+    /// Omit (or send null) to clear the active override(s) for the key.
+    value: Option<Value>,
+    expires_at: Option<String>,
+    reason: String,
+}
+
+async fn admin_override(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    Json(request): Json<AdminOverrideRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    let customer_id = Uuid::parse_str(request.customer_id.trim()).map_err(|_| {
+        AppError::validation("must be a UUID").with_details(json!({ "field": "customer_id" }))
+    })?;
+    let product_key = entitlements::clean_product_key(request.product_key.as_deref())?;
+    let (field, raw_key) = match (&request.feature_key, &request.quota_key) {
+        (Some(feature), None) => ("feature_key", feature.as_str()),
+        (None, Some(quota)) => ("quota_key", quota.as_str()),
+        _ => {
+            return Err(
+                AppError::validation("Provide exactly one of feature_key or quota_key.")
+                    .with_details(json!({ "field": "feature_key" })),
+            );
+        }
+    };
+    let key = clean_entitlement_key(raw_key)
+        .map_err(|message| AppError::validation(message).with_details(json!({ "field": field })))?;
+    let value = match &request.value {
+        Some(Value::Null) | None => None,
+        Some(value) => Some(clean_override_value(value).map_err(admin_validation_error)?),
+    };
+    let expires_at = parse_rfc3339(request.expires_at.as_deref(), "expires_at")?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+
+    let outcome = admin::set_entitlement_override(
+        &state.pool,
+        &operator.operator_id,
+        admin::OverrideInput {
+            customer_id,
+            product_key: &product_key,
+            feature_key: (field == "feature_key").then_some(key.as_str()),
+            quota_key: (field == "quota_key").then_some(key.as_str()),
+            value,
+            expires_at,
+            reason: &reason,
+        },
+        correlation_id(&correlation),
+    )
+    .await
+    .map_err(admin_error)?;
+    Ok(Json(json!({
+        "override_id": outcome.override_id,
+        "cleared_overrides": outcome.cleared,
+        "key": key,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminUsageAdjustRequest {
+    customer_id: String,
+    meter_key: String,
+    amount: f64,
+    period_key: Option<String>,
+    reason: String,
+}
+
+async fn admin_usage_adjust(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    Json(request): Json<AdminUsageAdjustRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    let key = idempotency_key(&headers).ok_or_else(|| {
+        AppError::bad_request("Usage adjustments require an Idempotency-Key header.")
+    })?;
+    let customer_id = Uuid::parse_str(request.customer_id.trim()).map_err(|_| {
+        AppError::validation("must be a UUID").with_details(json!({ "field": "customer_id" }))
+    })?;
+    let meter_key = clean_entitlement_key(&request.meter_key).map_err(|message| {
+        AppError::validation(message).with_details(json!({ "field": "meter_key" }))
+    })?;
+    let amount = clean_adjustment_amount(request.amount).map_err(admin_validation_error)?;
+    let period_key =
+        clean_period_key(request.period_key.as_deref()).map_err(admin_validation_error)?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+
+    let outcome = admin::adjust_usage(
+        &state.pool,
+        admin::UsageAdjustmentInput {
+            operator_id: &operator.operator_id,
+            customer_id,
+            meter_key: &meter_key,
+            amount,
+            period_key: &period_key,
+            idempotency_key: key,
+            reason: &reason,
+            correlation_id: correlation_id(&correlation),
+        },
+    )
+    .await
+    .map_err(admin_error)?;
+    Ok(Json(json!({
+        "usage_event_id": outcome.usage_event_id,
+        "customer_id": outcome.customer_id,
+        "meter_key": outcome.meter_key,
+        "period_key": outcome.period_key,
+        "amount": outcome.amount,
+        "replayed": outcome.replayed,
+    })))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AdminAuditQuery {
+    customer_id: Option<String>,
+    event_type: Option<String>,
+    limit: Option<i64>,
+}
+
+async fn admin_audit(
+    _admin: AdminContext,
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<AdminAuditQuery>,
+) -> AppResult<Json<Value>> {
+    let customer_id = match query.customer_id.as_deref().map(str::trim) {
+        Some(value) if !value.is_empty() => Some(Uuid::parse_str(value).map_err(|_| {
+            AppError::validation("must be a UUID").with_details(json!({ "field": "customer_id" }))
+        })?),
+        _ => None,
+    };
+    let event_type = match query.event_type.as_deref().map(str::trim) {
+        Some(value) if !value.is_empty() => {
+            Some(clean_entitlement_key(value).map_err(|message| {
+                AppError::validation(message).with_details(json!({ "field": "event_type" }))
+            })?)
+        }
+        _ => None,
+    };
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+
+    let events = admin::list_audit_events(
+        &state.pool,
+        admin::AuditFilter {
+            customer_id,
+            event_type: event_type.as_deref(),
+            limit,
+        },
+    )
+    .await?;
+    Ok(Json(json!({ "events": events })))
 }

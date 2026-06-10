@@ -10,6 +10,8 @@ pub struct Config {
     pub port: u16,
 
     pub database_url: String,
+    /// How long pool acquisition may retry connecting before failing closed.
+    pub database_acquire_timeout: Duration,
 
     pub supabase_jwt_issuer: String,
     pub supabase_jwt_audience: String,
@@ -23,6 +25,8 @@ pub struct Config {
 
     pub stripe_secret_key: String,
     pub stripe_webhook_secret: String,
+    /// Stripe API base URL; overridable for mocked end-to-end tests.
+    pub stripe_api_base: String,
 
     pub entitlement_signing_private_key: String,
     pub entitlement_signing_key_id: String,
@@ -78,6 +82,10 @@ impl Config {
             host: optional("HOST", "0.0.0.0"),
             port,
             database_url: require("DATABASE_URL")?,
+            database_acquire_timeout: Duration::from_secs(parse_u64(
+                "DATABASE_ACQUIRE_TIMEOUT_SECS",
+                30,
+            )?),
             supabase_jwt_issuer: require("SUPABASE_JWT_ISSUER")?,
             supabase_jwt_audience: optional("SUPABASE_JWT_AUDIENCE", "authenticated"),
             supabase_jwt_secret: optional("SUPABASE_JWT_SECRET", ""),
@@ -86,6 +94,7 @@ impl Config {
             admin_jwt_secret: optional("ADMIN_JWT_SECRET", ""),
             stripe_secret_key: optional("STRIPE_SECRET_KEY", ""),
             stripe_webhook_secret: optional("STRIPE_WEBHOOK_SECRET", ""),
+            stripe_api_base: optional("STRIPE_API_BASE", "https://api.stripe.com"),
             entitlement_signing_private_key: require("ENTITLEMENT_SIGNING_PRIVATE_KEY")?,
             entitlement_signing_key_id: optional("ENTITLEMENT_SIGNING_KEY_ID", "entitlement-key-1"),
             dataforge_api_url: optional("DATAFORGE_API_URL", ""),

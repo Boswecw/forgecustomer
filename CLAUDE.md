@@ -7,7 +7,8 @@ making changes. It encodes non-negotiable rules; violating them is a defect.
 
 ForgeCustomer is the authority for **customer identity, commerce, licensing,
 entitlements, installations, devices, usage, and commercial audit** for Boswell Digital
-Solutions products (first: AuthorForge). See `docs/SYSTEM.md` and `docs/DATA_AUTHORITY.md`.
+Solutions products (first: AuthorForge). See `doc/FOCSYSTEM.md` for the generated
+canonical system reference and `docs/DATA_AUTHORITY.md` for the ownership matrix.
 
 ## Hard rules (fail the change if violated)
 
@@ -45,7 +46,9 @@ Solutions products (first: AuthorForge). See `docs/SYSTEM.md` and `docs/DATA_AUT
 - `supabase/migrations/` — ordered SQL (`0001_..` → `0010_..`).
 - `contracts/` — `openapi.yaml`, `entitlement-v1.schema.json`, `events/`.
 - `tests/` — integration / security / stripe / licensing / entitlement.
-- `docs/` — authoritative design docs.
+- `doc/system/` — canonical system source tree; build `doc/FOCSYSTEM.md` with
+  `bash doc/system/BUILD.sh`.
+- `docs/` — supporting design, authority, API, domain, and runbook docs.
 
 ## Build & test
 

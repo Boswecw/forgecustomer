@@ -11,6 +11,7 @@ use crate::integrations::stripe::{
     ParsedStripeEvent, StripeCheckoutCompleted, StripeInvoiceChange, StripeSubscriptionChange,
     StripeWebhookReceiptStatus,
 };
+use crate::repositories::licensing;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StripeWebhookRecordOutcome {
@@ -520,7 +521,44 @@ async fn apply_subscription_change(
     )
     .await?;
     write_subscription_outbox(tx, webhook_event_id, event, &row).await?;
+    sync_license_from_subscription_truth(tx, event, &row, change.status).await?;
 
+    Ok(())
+}
+
+/// Keep the subscription-linked license consistent with the projected subscription, with
+/// a stripe-actor audit record for any license mutation it causes.
+async fn sync_license_from_subscription_truth(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &ParsedStripeEvent,
+    subscription: &SubscriptionProjectionRow,
+    status: SubscriptionStatus,
+) -> Result<(), StripeWebhookApplyError> {
+    let Some(sync) = licensing::sync_license_for_subscription(
+        tx,
+        subscription.customer_id,
+        subscription.id,
+        subscription.plan_version_id,
+        status,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+
+    write_audit(
+        tx,
+        AuditRecord {
+            event_type: sync.audit_event_type(),
+            event,
+            customer_id: Some(subscription.customer_id),
+            target_type: Some("license"),
+            target_id: Some(sync.license_id.to_string()),
+            before_state: sync.before_state(),
+            after_state: Some(sync.after_state()),
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -603,6 +641,7 @@ async fn apply_invoice_change(
         )
         .await?;
         write_subscription_outbox(tx, webhook_event_id, event, &row).await?;
+        sync_license_from_subscription_truth(tx, event, &row, invoice.status).await?;
     } else {
         write_audit(
             tx,

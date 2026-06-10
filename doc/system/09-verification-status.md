@@ -33,10 +33,16 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 - Checkout request validation and Stripe Checkout Session form construction.
 - Stripe checkout/subscription/invoice event extraction for webhook processing.
 - Account provisioning input validation and customer-auth boundary.
+- Installation registration validation: install key shape, Ed25519 public-key decode and
+  fingerprint stability, app version, and device label rules.
+- License sync transitions: issuance on cloud-granting status, past-due grace, suspension,
+  expiry, reactivation, and that revoked licenses never auto-lift.
 - Stripe webhook signature, parsing, missing/bad signature, and malformed signed-envelope
   rejection behavior.
 - Customer token cannot access admin route.
 - Unauthenticated admin route is rejected.
+- All licensing routes (listings, registration, and parameterized
+  activate/heartbeat/deactivate) and parameterized admin routes fail closed without auth.
 - Valid operator token reaches pending admin handler and returns `NOT_IMPLEMENTED`.
 - Public health route requires no token.
 - Error responses include the shared error contract and correlation ID.
@@ -49,13 +55,13 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 
 These are intentional MVP gaps and should not be hidden by documentation:
 
-- Installation/device activation flow.
 - Entitlement snapshot assembly and offline lease issuance.
 - Usage reserve/commit/release/current route wiring.
-- Admin handler implementations.
+- Admin handler implementations (including license revocation).
 - Deletion workflow endpoints.
-- Remaining non-Stripe outbox emit sites from the still-pending mutations.
-- End-to-end suites with live or mocked Stripe/Supabase/DataForge flows.
+- Remaining outbox emit sites from the still-pending mutations.
+- End-to-end suites with live or mocked Stripe/Supabase/DataForge flows (including
+  DB-backed proofs for device-limit, revocation, and registration idempotency paths).
 
 ### Release standard
 

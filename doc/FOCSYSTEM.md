@@ -70,6 +70,12 @@ Implemented today:
 - Stripe webhook signature verification, minimal non-PII event parsing, idempotent
   processing, subscription projection, invoice reference recording, commercial audit, and
   sanitized `subscription_changed` outbox emission.
+- Subscription-linked license issuance and sync (issue/suspend/expire/reactivate, device
+  limit from plan features) inside webhook processing.
+- Installation registration (idempotent by install key, optional Ed25519 device
+  identity), license activation with device-limit and revocation enforcement, heartbeat,
+  deactivation, and read-own installation/device/license listings, with audit and
+  sanitized `installation_registered` / `license_activated` outbox emission.
 - Public product and plan catalog endpoints backed by SQLx repositories.
 - Customer and admin JWT extraction boundaries.
 - Public entitlement key endpoint and Ed25519 signing/key-ring services.
@@ -83,11 +89,10 @@ Implemented today:
 
 Still pending before AuthorForge can rely on the service end to end:
 
-- Installation registration, activation, heartbeat, deactivation, and revocation routes.
 - Entitlement snapshot assembly from plan/grants/overrides and offline-lease issuance.
 - Usage reserve/commit/release/current endpoint wiring.
-- Admin handler implementations.
-- Remaining non-Stripe outbox emit sites and deletion workflow endpoints.
+- Admin handler implementations (including license revocation).
+- Remaining outbox emit sites and deletion workflow endpoints.
 
 The router intentionally returns `NOT_IMPLEMENTED` for many protected handlers while
 still enforcing the correct auth boundary. That is a security feature of the current
@@ -275,7 +280,7 @@ The HTTP API uses JSON over HTTPS with base path `/v1`. The machine-readable con
 | `GET /v1/products` | implemented | Active product catalog rows. |
 | `GET /v1/plans` | implemented | Active plan rows. |
 | `GET /v1/entitlements/keys` | implemented | Published Ed25519 verification keys. |
-| `POST /v1/webhooks/stripe` | implemented processing layer | Verifies Stripe signature, parses a minimal event envelope, stores/dedupes by Stripe event id, ignores unsupported events, and transactionally applies supported checkout/subscription/invoice state with audit + outbox. |
+| `POST /v1/webhooks/stripe` | implemented processing layer | Verifies Stripe signature, parses a minimal event envelope, stores/dedupes by Stripe event id, ignores unsupported events, and transactionally applies supported checkout/subscription/invoice state with audit + outbox + subscription-linked license sync. |
 
 ### Customer routes
 
@@ -307,8 +312,16 @@ Current route surface:
 `POST /v1/account/provision` creates or returns the caller's business customer profile
 idempotently and writes the initial status-history receipt for newly-created profiles.
 `GET /v1/account` returns the resolved customer/auth identifiers today. The remaining
-DB-backed customer handlers currently return `NOT_IMPLEMENTED` after auth and active
-customer checks pass.
+DB-backed customer handlers (entitlements, usage) currently return `NOT_IMPLEMENTED`
+after auth and active customer checks pass.
+
+The licensing surface is implemented: `POST /v1/installations` registers idempotently by
+client install key (optionally registering an Ed25519 device public key);
+`POST /v1/installations/{id}/activate` links a license to the installation under a row
+lock, enforcing the device limit and explicit revocations and failing closed on
+non-active licenses; heartbeat records liveness; deactivate releases the installation's
+activations; and the `GET` listings return the caller's own installations, devices, and
+licenses (with active device counts).
 
 `POST /v1/checkout` is implemented for active customers. It resolves the active paid
 catalog plan server-side, creates a Stripe Checkout Session, stores the returned Stripe
@@ -487,16 +500,26 @@ redirects must only confirm that the customer returned from Stripe.
 The model keeps licenses, installations, devices, activations, leases, and revocations as
 distinct concepts.
 
-Required behavior:
+Implemented behavior:
 
-- Device activation enforces plan/device limits.
-- Duplicate registration is idempotent.
-- Revoked devices cannot silently reactivate.
-- Customers can deactivate old installations to free a slot.
-- Activation/revocation writes commercial audit.
-- Offline leases are time-bound and denied for suspended or revoked contexts.
-
-Route wiring for these flows is pending.
+- Subscription-linked licenses are issued and kept in sync by verified webhook processing
+  only: cloud-granting statuses issue/reactivate, `past_due` is a dunning grace window,
+  `unpaid`/`paused`/`incomplete` suspend, `canceled` expires, and a revoked license is
+  never changed by subscription state. The device limit comes from the plan version's
+  `<product>.devices.max` feature (default 1).
+- Registration is idempotent by client-supplied install key; an optional base64 Ed25519
+  public key (validated to 32 bytes, fingerprinted with SHA-256) upserts device identity.
+  Re-registering a deactivated installation reactivates the installation record only.
+- Activation locks the license row, then fails closed in order: deactivated installation,
+  revoked device, revoked/suspended/expired license, explicit `license_revocations` row
+  (license-, installation-, or device-scoped), and finally the device limit. An
+  already-active pairing returns idempotently.
+- Customers deactivate old installations to free slots; deactivation releases the
+  installation's active activations.
+- Activation, deactivation, and every license sync mutation write commercial audit;
+  registration and activation also queue sanitized outbox events.
+- Offline leases are time-bound and denied for suspended or revoked contexts; lease
+  issuance wiring lands with the entitlement snapshot work.
 
 ### Entitlements
 
@@ -583,8 +606,9 @@ Stripe integration rules:
 - Raw webhook payload retention must be minimal and access-restricted.
 
 Checkout creation, signature verification, event parsing, idempotent receipt, subscription
-projection, invoice references, audit writes, and sanitized subscription outbox emission
-exist. Entitlement snapshot assembly from those projected rows remains a later phase.
+projection, invoice references, audit writes, sanitized subscription outbox emission, and
+subscription-linked license sync exist. Entitlement snapshot assembly from those projected
+rows remains a later phase.
 
 ### DataForge outbox
 
@@ -598,6 +622,9 @@ Outbox behavior:
 - DataForge failures do not roll back customer transactions.
 - Retry uses deterministic backoff and eventually dead-letters exhausted events.
 - Delivery keys must make repeated publishes idempotent downstream.
+
+Live emit sites: `subscription_changed` (webhook processing), `installation_registered`
+(first registration), and `license_activated` (successful activation).
 
 ### Event payload hygiene
 
@@ -821,10 +848,16 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 - Checkout request validation and Stripe Checkout Session form construction.
 - Stripe checkout/subscription/invoice event extraction for webhook processing.
 - Account provisioning input validation and customer-auth boundary.
+- Installation registration validation: install key shape, Ed25519 public-key decode and
+  fingerprint stability, app version, and device label rules.
+- License sync transitions: issuance on cloud-granting status, past-due grace, suspension,
+  expiry, reactivation, and that revoked licenses never auto-lift.
 - Stripe webhook signature, parsing, missing/bad signature, and malformed signed-envelope
   rejection behavior.
 - Customer token cannot access admin route.
 - Unauthenticated admin route is rejected.
+- All licensing routes (listings, registration, and parameterized
+  activate/heartbeat/deactivate) and parameterized admin routes fail closed without auth.
 - Valid operator token reaches pending admin handler and returns `NOT_IMPLEMENTED`.
 - Public health route requires no token.
 - Error responses include the shared error contract and correlation ID.
@@ -837,13 +870,13 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 
 These are intentional MVP gaps and should not be hidden by documentation:
 
-- Installation/device activation flow.
 - Entitlement snapshot assembly and offline lease issuance.
 - Usage reserve/commit/release/current route wiring.
-- Admin handler implementations.
+- Admin handler implementations (including license revocation).
 - Deletion workflow endpoints.
-- Remaining non-Stripe outbox emit sites from the still-pending mutations.
-- End-to-end suites with live or mocked Stripe/Supabase/DataForge flows.
+- Remaining outbox emit sites from the still-pending mutations.
+- End-to-end suites with live or mocked Stripe/Supabase/DataForge flows (including
+  DB-backed proofs for device-limit, revocation, and registration idempotency paths).
 
 ### Release standard
 

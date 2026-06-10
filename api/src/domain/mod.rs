@@ -4,6 +4,7 @@
 pub mod checkout;
 pub mod customer;
 pub mod entitlement;
+pub mod installation;
 pub mod license;
 pub mod redaction;
 pub mod snapshot;

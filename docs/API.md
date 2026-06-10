@@ -9,8 +9,9 @@ Base path: `/v1`. Transport: JSON over HTTPS. The machine-readable contract is
   JWTs; `/v1/admin/*` requires an operator JWT from the admin issuer.
 - **Correlation**: every response includes `X-Correlation-Id`. Clients may send one via
   `X-Correlation-Id`; otherwise the server generates one.
-- **Idempotency**: mutating endpoints accept `Idempotency-Key`. Usage and installation
-  operations require a stable key to make retries safe.
+- **Idempotency**: mutating endpoints accept `Idempotency-Key`. Usage operations require
+  a stable key to make retries safe; installation registration is idempotent on the
+  client-supplied `install_key`, and activation is idempotent per (license, installation).
 - **Limits**: request bodies are size-limited; requests are rate-limited and time-limited.
 
 ## Error contract
@@ -83,6 +84,33 @@ Clients may submit only profile decoration:
 Customer type, status, commercial records, licenses, entitlements, and usage state are
 server-owned and cannot be set by this endpoint.
 
+## Licensing: installations, devices, licenses
+
+See `docs/LICENSING.md` for the full rules. Summary of the live endpoints:
+
+- `POST /v1/installations` registers an installed application instance, idempotent on the
+  client-supplied `install_key` (8–120 chars of `[A-Za-z0-9._:-]`). An optional
+  `device_public_key` (base64 32-byte Ed25519 public key) registers the device identity;
+  the private key never leaves the client. Re-registering a deactivated installation
+  reactivates the installation record; license slots are only consumed by activation.
+  First registration queues a sanitized `installation_registered` outbox event.
+- `GET /v1/installations`, `GET /v1/devices`, `GET /v1/licenses` list the caller's own
+  rows (licenses include `device_limit` and the current `active_devices` count).
+- `POST /v1/installations/{id}/activate` links a license to the installation. With no
+  `license_id` in the body, the most recently issued active license for the
+  installation's product is used. Fails closed: suspended/expired licenses → `403
+  FORBIDDEN`, revoked licenses / revoked devices / explicit `license_revocations` rows →
+  `403 REVOKED`, full license → `402 DEVICE_LIMIT_REACHED` (details carry
+  `device_limit` and `active_devices`). The license row is locked during activation so
+  concurrent requests cannot oversubscribe the limit. Re-activating an already-active
+  pairing returns `already_active: true`. Writes a `license_activated` audit event and
+  outbox event.
+- `POST /v1/installations/{id}/heartbeat` records liveness (`last_heartbeat_at`) and may
+  refresh the reported `app_version`.
+- `POST /v1/installations/{id}/deactivate` deactivates the installation and releases its
+  active activations, freeing device slots (idempotent). Writes an
+  `installation_deactivated` audit event.
+
 ## Stripe webhook processing
 
 `POST /v1/webhooks/stripe` verifies `Stripe-Signature` with `STRIPE_WEBHOOK_SECRET`
@@ -93,8 +121,10 @@ deliveries return `200` with `duplicate: true`.
 Unsupported events are acknowledged and stored as `ignored`. Supported checkout,
 subscription, and invoice events apply in one transaction: subscription projection is
 normalized, invoice references are recorded, commercial audit is written, a sanitized
-`subscription_changed` outbox event is queued when commercial status changes, and the
-webhook receipt is marked `processed`.
+`subscription_changed` outbox event is queued when commercial status changes, the
+subscription-linked license is issued/suspended/expired/reactivated to match the new
+subscription truth (see `docs/LICENSING.md`), and the webhook receipt is marked
+`processed`.
 
 ## Checkout creation
 

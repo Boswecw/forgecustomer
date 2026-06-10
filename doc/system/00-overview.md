@@ -27,6 +27,12 @@ Implemented today:
 - Stripe webhook signature verification, minimal non-PII event parsing, idempotent
   processing, subscription projection, invoice reference recording, commercial audit, and
   sanitized `subscription_changed` outbox emission.
+- Subscription-linked license issuance and sync (issue/suspend/expire/reactivate, device
+  limit from plan features) inside webhook processing.
+- Installation registration (idempotent by install key, optional Ed25519 device
+  identity), license activation with device-limit and revocation enforcement, heartbeat,
+  deactivation, and read-own installation/device/license listings, with audit and
+  sanitized `installation_registered` / `license_activated` outbox emission.
 - Public product and plan catalog endpoints backed by SQLx repositories.
 - Customer and admin JWT extraction boundaries.
 - Public entitlement key endpoint and Ed25519 signing/key-ring services.
@@ -40,11 +46,10 @@ Implemented today:
 
 Still pending before AuthorForge can rely on the service end to end:
 
-- Installation registration, activation, heartbeat, deactivation, and revocation routes.
 - Entitlement snapshot assembly from plan/grants/overrides and offline-lease issuance.
 - Usage reserve/commit/release/current endpoint wiring.
-- Admin handler implementations.
-- Remaining non-Stripe outbox emit sites and deletion workflow endpoints.
+- Admin handler implementations (including license revocation).
+- Remaining outbox emit sites and deletion workflow endpoints.
 
 The router intentionally returns `NOT_IMPLEMENTED` for many protected handlers while
 still enforcing the correct auth boundary. That is a security feature of the current

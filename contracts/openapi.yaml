@@ -95,49 +95,164 @@ paths:
   /v1/licenses:
     get:
       tags: [licensing]
-      summary: Own licenses
+      summary: Own licenses (with active device counts)
       responses:
+        "200":
+          description: License list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [licenses]
+                properties:
+                  licenses:
+                    type: array
+                    items: { $ref: "#/components/schemas/License" }
         "401": { $ref: "#/components/responses/Unauthorized" }
   /v1/installations:
     get:
       tags: [licensing]
       summary: List installations
       responses:
+        "200":
+          description: Installation list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [installations]
+                properties:
+                  installations:
+                    type: array
+                    items: { $ref: "#/components/schemas/Installation" }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [licensing]
-      summary: Register an installation (idempotent)
-      parameters:
-        - $ref: "#/components/parameters/IdempotencyKey"
+      summary: Register an installation (idempotent by client-supplied install_key)
+      description: >
+        Registers an installed application instance and, when a device public key is
+        supplied, the device identity it runs on. Repeat registration with the same
+        install_key returns the existing installation; re-registering a deactivated
+        installation reactivates the installation record (license slots are only consumed
+        by activation). The client keeps its Ed25519 private key local and registers only
+        the public key.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InstallationRegisterRequest" }
       responses:
+        "200":
+          description: Registered (or existing) installation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InstallationRegisterResponse" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Unknown or inactive product }
+        "409": { description: Install key already registered for a different product }
+        "422": { description: Registration validation failed }
   /v1/installations/{id}/activate:
     post:
       tags: [licensing]
       summary: Activate a license on an installation (enforces device limit)
+      description: >
+        Links the customer's license to the installation. When license_id is omitted the
+        most recently issued active license for the installation's product is used.
+        Fails closed on suspended/expired/revoked licenses and on explicit revocation
+        records; concurrent activations are serialized per license. Idempotent for an
+        already-active pairing.
       parameters: [{ $ref: "#/components/parameters/PathId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                license_id:
+                  type: ["string", "null"]
+                  format: uuid
+                  description: Explicit license to activate; defaults to the product's active license.
       responses:
+        "200":
+          description: Activation result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InstallationActivateResponse" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "402": { description: Device limit reached }
+        "402": { description: "Device limit reached (DEVICE_LIMIT_REACHED)" }
+        "403": { description: "License not active, or activation blocked by revocation (REVOKED)" }
+        "404": { description: "Installation or license not found" }
+        "409": { description: "Installation is deactivated; register it again first" }
   /v1/installations/{id}/heartbeat:
     post:
       tags: [licensing]
-      summary: Installation heartbeat
+      summary: Installation heartbeat (liveness; may refresh reported app version)
       parameters: [{ $ref: "#/components/parameters/PathId" }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                app_version: { type: ["string", "null"], maxLength: 64 }
       responses:
+        "200":
+          description: Heartbeat recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [installation_id, status]
+                properties:
+                  installation_id: { type: string, format: uuid }
+                  status: { type: string, enum: [active, deactivated] }
+                  app_version: { type: ["string", "null"] }
+                  last_heartbeat_at: { type: ["string", "null"], format: date-time }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Installation not found }
   /v1/installations/{id}/deactivate:
     post:
       tags: [licensing]
-      summary: Deactivate an installation
+      summary: Deactivate an installation (releases its license activations)
+      description: >
+        Marks the installation deactivated and releases its active license activations,
+        freeing device slots. Idempotent.
       parameters: [{ $ref: "#/components/parameters/PathId" }]
       responses:
+        "200":
+          description: Deactivation result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [installation_id, status, released_activations, already_deactivated]
+                properties:
+                  installation_id: { type: string, format: uuid }
+                  status: { type: string, enum: [deactivated] }
+                  released_activations: { type: integer, minimum: 0 }
+                  already_deactivated: { type: boolean }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Installation not found }
   /v1/devices:
     get:
       tags: [licensing]
       summary: Own devices
       responses:
+        "200":
+          description: Device list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [devices]
+                properties:
+                  devices:
+                    type: array
+                    items: { $ref: "#/components/schemas/Device" }
         "401": { $ref: "#/components/responses/Unauthorized" }
   /v1/entitlements/current:
     get:
@@ -336,6 +451,97 @@ components:
         stripe_checkout_session_id: { type: string, examples: ["cs_test_123"] }
         checkout_url: { type: string, format: uri }
         status: { type: string, examples: ["created"] }
+    License:
+      type: object
+      required: [id, product_key, status, device_limit, active_devices, issued_at]
+      properties:
+        id: { type: string, format: uuid }
+        product_key: { type: string, examples: ["authorforge"] }
+        status: { type: string, enum: [active, suspended, revoked, expired] }
+        device_limit: { type: integer, minimum: 0 }
+        active_devices: { type: integer, minimum: 0 }
+        subscription_id: { type: ["string", "null"], format: uuid }
+        issued_at: { type: string, format: date-time }
+        expires_at: { type: ["string", "null"], format: date-time }
+    Installation:
+      type: object
+      required: [id, install_key, product_key, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        install_key: { type: string }
+        product_key: { type: string }
+        app_version: { type: ["string", "null"] }
+        status: { type: string, enum: [active, deactivated] }
+        device_id: { type: ["string", "null"], format: uuid }
+        last_heartbeat_at: { type: ["string", "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+    Device:
+      type: object
+      required: [id, public_key, public_key_fpr, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        public_key:
+          type: string
+          description: Base64 Ed25519 public key registered by the client.
+        public_key_fpr:
+          type: string
+          description: SHA-256 hex fingerprint of the raw public key bytes.
+        label: { type: ["string", "null"] }
+        status: { type: string, enum: [active, revoked] }
+        created_at: { type: string, format: date-time }
+    InstallationRegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [install_key]
+      properties:
+        install_key:
+          type: string
+          minLength: 8
+          maxLength: 120
+          pattern: "^[A-Za-z0-9._:-]+$"
+          description: Client-generated stable key; registration is idempotent on it.
+        product_key:
+          type: ["string", "null"]
+          default: authorforge
+        app_version: { type: ["string", "null"], maxLength: 64 }
+        device_public_key:
+          type: ["string", "null"]
+          description: Base64-encoded 32-byte Ed25519 public key (private key stays client-side).
+        device_label:
+          type: ["string", "null"]
+          maxLength: 80
+          description: Optional device label; requires device_public_key.
+    InstallationRegisterResponse:
+      type: object
+      required: [installation_id, install_key, product_key, status, created, reactivated]
+      properties:
+        installation_id: { type: string, format: uuid }
+        install_key: { type: string }
+        product_key: { type: string }
+        app_version: { type: ["string", "null"] }
+        status: { type: string, enum: [active] }
+        device_id: { type: ["string", "null"], format: uuid }
+        created:
+          type: boolean
+          description: True when this request inserted the installation row.
+        reactivated:
+          type: boolean
+          description: True when this request reactivated a deactivated installation.
+    InstallationActivateResponse:
+      type: object
+      required:
+        [activation_id, license_id, installation_id, activated_at, device_limit,
+         active_devices, already_active]
+      properties:
+        activation_id: { type: string, format: uuid }
+        license_id: { type: string, format: uuid }
+        installation_id: { type: string, format: uuid }
+        activated_at: { type: string, format: date-time }
+        device_limit: { type: integer, minimum: 0 }
+        active_devices: { type: integer, minimum: 0 }
+        already_active:
+          type: boolean
+          description: True when the pairing was already active (idempotent re-activation).
     StripeWebhookResponse:
       type: object
       required: [received, duplicate, event_id, event_type, status]

@@ -43,16 +43,26 @@ redirects must only confirm that the customer returned from Stripe.
 The model keeps licenses, installations, devices, activations, leases, and revocations as
 distinct concepts.
 
-Required behavior:
+Implemented behavior:
 
-- Device activation enforces plan/device limits.
-- Duplicate registration is idempotent.
-- Revoked devices cannot silently reactivate.
-- Customers can deactivate old installations to free a slot.
-- Activation/revocation writes commercial audit.
-- Offline leases are time-bound and denied for suspended or revoked contexts.
-
-Route wiring for these flows is pending.
+- Subscription-linked licenses are issued and kept in sync by verified webhook processing
+  only: cloud-granting statuses issue/reactivate, `past_due` is a dunning grace window,
+  `unpaid`/`paused`/`incomplete` suspend, `canceled` expires, and a revoked license is
+  never changed by subscription state. The device limit comes from the plan version's
+  `<product>.devices.max` feature (default 1).
+- Registration is idempotent by client-supplied install key; an optional base64 Ed25519
+  public key (validated to 32 bytes, fingerprinted with SHA-256) upserts device identity.
+  Re-registering a deactivated installation reactivates the installation record only.
+- Activation locks the license row, then fails closed in order: deactivated installation,
+  revoked device, revoked/suspended/expired license, explicit `license_revocations` row
+  (license-, installation-, or device-scoped), and finally the device limit. An
+  already-active pairing returns idempotently.
+- Customers deactivate old installations to free slots; deactivation releases the
+  installation's active activations.
+- Activation, deactivation, and every license sync mutation write commercial audit;
+  registration and activation also queue sanitized outbox events.
+- Offline leases are time-bound and denied for suspended or revoked contexts; lease
+  issuance wiring lands with the entitlement snapshot work.
 
 ### Entitlements
 

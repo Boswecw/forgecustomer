@@ -28,8 +28,9 @@ Stripe integration rules:
 - Raw webhook payload retention must be minimal and access-restricted.
 
 Checkout creation, signature verification, event parsing, idempotent receipt, subscription
-projection, invoice references, audit writes, and sanitized subscription outbox emission
-exist. Entitlement snapshot assembly from those projected rows remains a later phase.
+projection, invoice references, audit writes, sanitized subscription outbox emission, and
+subscription-linked license sync exist. Entitlement snapshot assembly from those projected
+rows remains a later phase.
 
 ### DataForge outbox
 
@@ -43,6 +44,9 @@ Outbox behavior:
 - DataForge failures do not roll back customer transactions.
 - Retry uses deterministic backoff and eventually dead-letters exhausted events.
 - Delivery keys must make repeated publishes idempotent downstream.
+
+Live emit sites: `subscription_changed` (webhook processing), `installation_registered`
+(first registration), and `license_activated` (successful activation).
 
 ### Event payload hygiene
 

@@ -5,8 +5,9 @@ state. Only verified webhook processing changes subscription truth.
 
 Current implementation status: Checkout Session creation, signature verification, event
 parsing, idempotent receipt, duplicate detection, unsupported-event ignoring, subscription
-projection, invoice reference recording, commercial audit writes, and sanitized
-`subscription_changed` outbox emission are live.
+projection, invoice reference recording, commercial audit writes, sanitized
+`subscription_changed` outbox emission, and subscription-linked license sync (issue /
+suspend / expire / reactivate per `docs/LICENSING.md`) are live.
 
 ## Tables (migration `0003_commerce.sql`)
 
@@ -55,6 +56,8 @@ Stripe → POST /v1/webhooks/stripe
       → update checkout/session/invoice references as applicable
       → write commercial_audit_event
       → write sanitized subscription_changed outbox_event when status changes
+      → sync the subscription-linked license (issue/suspend/expire/reactivate;
+        see docs/LICENSING.md), with its own audit event
       → mark webhook processed
     COMMIT
   → ack 200

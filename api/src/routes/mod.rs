@@ -1,19 +1,19 @@
 //! HTTP routing. Public routes need no auth; customer routes resolve a [`CustomerContext`];
 //! admin routes resolve an [`AdminContext`] validated against the separate operator issuer.
 //!
-//! Handlers whose full behavior depends on remaining MVP wiring (licensing, entitlement
-//! snapshot assembly, usage, and admin flows) return `NOT_IMPLEMENTED` but still enforce
-//! the correct auth boundary, so the security contract is testable today.
+//! Handlers whose full behavior depends on remaining MVP wiring (entitlement snapshot
+//! assembly, usage, and admin flows) return `NOT_IMPLEMENTED` but still enforce the
+//! correct auth boundary, so the security contract is testable today.
 
 pub mod catalog;
 pub mod entitlements;
 pub mod health;
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -23,6 +23,7 @@ use crate::domain::checkout::{validate_checkout_input, CheckoutInput};
 use crate::domain::customer::{
     normalize_email_claim, validate_provision_profile, ProvisionProfileInput,
 };
+use crate::domain::installation::{clean_app_version, validate_registration, RegistrationInput};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::integrations::stripe::{
     create_checkout_session, parse_event, verify_signature, CheckoutError, CheckoutSessionRequest,
@@ -30,6 +31,7 @@ use crate::integrations::stripe::{
 };
 use crate::middleware as mw;
 use crate::repositories::commerce::{StripeWebhookApplyError, StripeWebhookRecordOutcome};
+use crate::repositories::licensing::{self, ActivationError, RegistrationError};
 use crate::repositories::{commerce, customers};
 use crate::state::AppState;
 
@@ -53,15 +55,15 @@ pub fn build_router(state: AppState) -> Router {
             get(installations_list).post(installations_register),
         )
         .route(
-            "/v1/installations/{id}/activate",
+            "/v1/installations/:id/activate",
             post(installation_activate),
         )
         .route(
-            "/v1/installations/{id}/heartbeat",
+            "/v1/installations/:id/heartbeat",
             post(installation_heartbeat),
         )
         .route(
-            "/v1/installations/{id}/deactivate",
+            "/v1/installations/:id/deactivate",
             post(installation_deactivate),
         )
         .route("/v1/devices", get(devices_get))
@@ -82,11 +84,11 @@ pub fn build_router(state: AppState) -> Router {
 
     let admin = Router::new()
         .route("/v1/admin/customers", get(admin_customers))
-        .route("/v1/admin/customers/{id}/suspend", post(admin_suspend))
-        .route("/v1/admin/customers/{id}/restore", post(admin_restore))
-        .route("/v1/admin/subscriptions/{id}/resync", post(admin_resync))
+        .route("/v1/admin/customers/:id/suspend", post(admin_suspend))
+        .route("/v1/admin/customers/:id/restore", post(admin_restore))
+        .route("/v1/admin/subscriptions/:id/resync", post(admin_resync))
         .route("/v1/admin/licenses", post(admin_issue_license))
-        .route("/v1/admin/licenses/{id}/revoke", post(admin_revoke_license))
+        .route("/v1/admin/licenses/:id/revoke", post(admin_revoke_license))
         .route("/v1/admin/entitlements/override", post(admin_override))
         .route("/v1/admin/usage/adjust", post(admin_usage_adjust))
         .route("/v1/admin/audit", get(admin_audit));
@@ -144,6 +146,56 @@ struct CheckoutCreateRequest {
     cancel_url: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct InstallationRegisterRequest {
+    install_key: String,
+    product_key: Option<String>,
+    app_version: Option<String>,
+    device_public_key: Option<String>,
+    device_label: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct InstallationRegisterResponse {
+    installation_id: Uuid,
+    install_key: String,
+    product_key: String,
+    app_version: Option<String>,
+    status: String,
+    device_id: Option<Uuid>,
+    created: bool,
+    reactivated: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct InstallationActivateRequest {
+    license_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+struct InstallationActivateResponse {
+    activation_id: Uuid,
+    license_id: Uuid,
+    installation_id: Uuid,
+    activated_at: chrono::DateTime<chrono::Utc>,
+    device_limit: u32,
+    active_devices: u32,
+    already_active: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct InstallationHeartbeatRequest {
+    app_version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct InstallationDeactivateResponse {
+    installation_id: Uuid,
+    status: String,
+    released_activations: u64,
+    already_deactivated: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct CheckoutCreateResponse {
     checkout_session_id: Uuid,
@@ -193,6 +245,67 @@ fn idempotency_key(headers: &HeaderMap) -> Option<&str> {
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+/// Parse a path id ourselves so malformed ids render through the error contract instead
+/// of axum's plain-text rejection.
+fn parse_path_id(raw: &str) -> AppResult<Uuid> {
+    Uuid::parse_str(raw).map_err(|_| AppError::bad_request("Path id must be a UUID."))
+}
+
+fn correlation_id(correlation: &Option<Extension<mw::CorrelationId>>) -> Option<&str> {
+    correlation
+        .as_ref()
+        .map(|Extension(correlation)| correlation.0.as_str())
+}
+
+fn installation_validation_error(
+    error: crate::domain::installation::InstallationValidationError,
+) -> AppError {
+    AppError::validation(error.message).with_details(json!({ "field": error.field }))
+}
+
+fn registration_error(error: RegistrationError) -> AppError {
+    match error {
+        RegistrationError::UnknownProduct => AppError::not_found("Unknown or inactive product."),
+        RegistrationError::ProductMismatch => AppError::new(
+            ErrorCode::Conflict,
+            "This install key is already registered for a different product.",
+        ),
+        RegistrationError::Db(error) => error.into(),
+    }
+}
+
+fn activation_error(error: ActivationError) -> AppError {
+    match error {
+        ActivationError::InstallationNotFound => AppError::not_found("Installation not found."),
+        ActivationError::InstallationDeactivated => AppError::new(
+            ErrorCode::Conflict,
+            "Installation is deactivated; register it again before activating.",
+        ),
+        ActivationError::LicenseNotFound => AppError::not_found("License not found."),
+        ActivationError::NoActiveLicense => {
+            AppError::not_found("No active license covers this product.")
+        }
+        ActivationError::LicenseNotActive(status) => AppError::forbidden("License is not active.")
+            .with_details(json!({ "license_status": status })),
+        ActivationError::RevocationBlocked => AppError::new(
+            ErrorCode::Revoked,
+            "Activation is blocked by an explicit revocation.",
+        ),
+        ActivationError::DeviceLimitReached {
+            device_limit,
+            active_devices,
+        } => AppError::new(
+            ErrorCode::DeviceLimitReached,
+            "Device limit reached; deactivate another installation to free a slot.",
+        )
+        .with_details(json!({
+            "device_limit": device_limit,
+            "active_devices": active_devices,
+        })),
+        ActivationError::Db(error) => error.into(),
+    }
 }
 
 // --- Customer endpoints (auth enforced via CustomerContext) ----------------
@@ -246,39 +359,150 @@ async fn subscriptions_get(ctx: CustomerContext) -> AppResult<Json<Value>> {
     Err(pending("Subscription summary"))
 }
 
-async fn licenses_get(ctx: CustomerContext) -> AppResult<Json<Value>> {
-    ctx.require_active()?;
-    Err(pending("License listing"))
+async fn licenses_get(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+) -> AppResult<Json<Value>> {
+    let customer_id = ctx.require_active()?;
+    let licenses = licensing::list_licenses(&state.pool, customer_id).await?;
+    Ok(Json(json!({ "licenses": licenses })))
 }
 
-async fn installations_list(ctx: CustomerContext) -> AppResult<Json<Value>> {
-    ctx.require_active()?;
-    Err(pending("Installation listing"))
+async fn installations_list(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+) -> AppResult<Json<Value>> {
+    let customer_id = ctx.require_active()?;
+    let installations = licensing::list_installations(&state.pool, customer_id).await?;
+    Ok(Json(json!({ "installations": installations })))
 }
 
-async fn installations_register(ctx: CustomerContext) -> AppResult<Json<Value>> {
-    ctx.require_active()?;
-    Err(pending("Installation registration"))
+async fn installations_register(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+    Json(request): Json<InstallationRegisterRequest>,
+) -> AppResult<Json<InstallationRegisterResponse>> {
+    let customer_id = ctx.require_active()?;
+    let validated = validate_registration(RegistrationInput {
+        install_key: &request.install_key,
+        product_key: request.product_key.as_deref(),
+        app_version: request.app_version.as_deref(),
+        device_public_key: request.device_public_key.as_deref(),
+        device_label: request.device_label.as_deref(),
+    })
+    .map_err(installation_validation_error)?;
+
+    let registered = licensing::register_installation(&state.pool, customer_id, &validated)
+        .await
+        .map_err(registration_error)?;
+
+    let installation = registered.installation;
+    Ok(Json(InstallationRegisterResponse {
+        installation_id: installation.id,
+        install_key: installation.install_key,
+        product_key: installation.product_key,
+        app_version: installation.app_version,
+        status: installation.status,
+        device_id: installation.device_id,
+        created: registered.created,
+        reactivated: registered.reactivated,
+    }))
 }
 
-async fn installation_activate(ctx: CustomerContext) -> AppResult<Json<Value>> {
-    ctx.require_active()?;
-    Err(pending("Installation activation"))
+async fn installation_activate(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    Path(id): Path<String>,
+    Json(request): Json<InstallationActivateRequest>,
+) -> AppResult<Json<InstallationActivateResponse>> {
+    let customer_id = ctx.require_active()?;
+    let installation_id = parse_path_id(&id)?;
+
+    let outcome = licensing::activate_installation(
+        &state.pool,
+        customer_id,
+        installation_id,
+        request.license_id,
+        correlation_id(&correlation),
+    )
+    .await
+    .map_err(activation_error)?;
+
+    Ok(Json(InstallationActivateResponse {
+        activation_id: outcome.activation_id,
+        license_id: outcome.license_id,
+        installation_id: outcome.installation_id,
+        activated_at: outcome.activated_at,
+        device_limit: outcome.device_limit,
+        active_devices: outcome.active_devices,
+        already_active: outcome.already_active,
+    }))
 }
 
-async fn installation_heartbeat(ctx: CustomerContext) -> AppResult<Json<Value>> {
-    ctx.require_active()?;
-    Err(pending("Installation heartbeat"))
+async fn installation_heartbeat(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    request: Option<Json<InstallationHeartbeatRequest>>,
+) -> AppResult<Json<Value>> {
+    let customer_id = ctx.require_active()?;
+    let installation_id = parse_path_id(&id)?;
+    let app_version = request
+        .as_ref()
+        .and_then(|Json(request)| request.app_version.as_deref());
+    let app_version = clean_app_version(app_version).map_err(installation_validation_error)?;
+
+    let row = licensing::heartbeat_installation(
+        &state.pool,
+        customer_id,
+        installation_id,
+        app_version.as_deref(),
+    )
+    .await?
+    .ok_or_else(|| AppError::not_found("Installation not found."))?;
+
+    Ok(Json(json!({
+        "installation_id": row.id,
+        "status": row.status,
+        "app_version": row.app_version,
+        "last_heartbeat_at": row.last_heartbeat_at,
+    })))
 }
 
-async fn installation_deactivate(ctx: CustomerContext) -> AppResult<Json<Value>> {
-    ctx.require_active()?;
-    Err(pending("Installation deactivation"))
+async fn installation_deactivate(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    Path(id): Path<String>,
+) -> AppResult<Json<InstallationDeactivateResponse>> {
+    let customer_id = ctx.require_active()?;
+    let installation_id = parse_path_id(&id)?;
+
+    let outcome = licensing::deactivate_installation(
+        &state.pool,
+        customer_id,
+        installation_id,
+        correlation_id(&correlation),
+    )
+    .await
+    .map_err(activation_error)?;
+
+    Ok(Json(InstallationDeactivateResponse {
+        installation_id: outcome.installation_id,
+        status: outcome.status,
+        released_activations: outcome.released_activations,
+        already_deactivated: outcome.already_deactivated,
+    }))
 }
 
-async fn devices_get(ctx: CustomerContext) -> AppResult<Json<Value>> {
-    ctx.require_active()?;
-    Err(pending("Device listing"))
+async fn devices_get(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+) -> AppResult<Json<Value>> {
+    let customer_id = ctx.require_active()?;
+    let devices = licensing::list_devices(&state.pool, customer_id).await?;
+    Ok(Json(json!({ "devices": devices })))
 }
 
 async fn entitlements_check(ctx: CustomerContext) -> AppResult<Json<Value>> {

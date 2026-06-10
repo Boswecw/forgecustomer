@@ -169,6 +169,57 @@ async fn account_provision_validates_customer_profile_input_before_db_write() {
 }
 
 #[tokio::test]
+async fn licensing_routes_require_customer_auth() {
+    // Listing endpoints.
+    for uri in ["/v1/licenses", "/v1/installations", "/v1/devices"] {
+        let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        assert_eq!(status_of(req).await, StatusCode::UNAUTHORIZED, "{uri}");
+    }
+    // Registration.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/installations")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    assert_eq!(status_of(req).await, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn parameterized_installation_routes_match_and_require_auth() {
+    // A 401 (not 404) proves the parameterized route matches AND fails closed without
+    // auth. This guards the axum 0.7 `:id` path syntax.
+    let id = "9f1c2d3e-4b5a-6789-0abc-def012345678";
+    for action in ["activate", "heartbeat", "deactivate"] {
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/v1/installations/{id}/{action}"))
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        assert_eq!(status_of(req).await, StatusCode::UNAUTHORIZED, "{action}");
+    }
+}
+
+#[tokio::test]
+async fn parameterized_admin_routes_match_and_require_auth() {
+    let id = "9f1c2d3e-4b5a-6789-0abc-def012345678";
+    for uri in [
+        format!("/v1/admin/customers/{id}/suspend"),
+        format!("/v1/admin/customers/{id}/restore"),
+        format!("/v1/admin/subscriptions/{id}/resync"),
+        format!("/v1/admin/licenses/{id}/revoke"),
+    ] {
+        let req = Request::builder()
+            .method("POST")
+            .uri(&uri)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(status_of(req).await, StatusCode::UNAUTHORIZED, "{uri}");
+    }
+}
+
+#[tokio::test]
 async fn stripe_webhook_requires_signature() {
     let req = Request::builder()
         .method("POST")

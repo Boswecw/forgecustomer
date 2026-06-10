@@ -45,8 +45,18 @@ Current route surface:
 `POST /v1/account/provision` creates or returns the caller's business customer profile
 idempotently and writes the initial status-history receipt for newly-created profiles.
 `GET /v1/account` returns the resolved customer/auth identifiers today. The remaining
-DB-backed customer handlers (entitlements, usage) currently return `NOT_IMPLEMENTED`
-after auth and active customer checks pass.
+DB-backed customer handlers (usage) currently return `NOT_IMPLEMENTED` after auth and
+active customer checks pass.
+
+The entitlement surface is implemented: `GET /v1/entitlements/current` assembles the
+caller's entitlements (included-plan baseline → subscription plan → license grants →
+promotional grants → admin overrides, with cloud gating and fail-closed denials), signs
+the snapshot with the active Ed25519 key, stores it for audit/replay, and returns it
+with wire field order matching the canonical signing order. `POST /v1/entitlements/check`
+answers an advisory feature or quota question read-only and fail-closed.
+`POST /v1/entitlements/offline-lease` issues a stored, audited, signed `forge.lease.v1`
+document for an activated installation and refuses suspended, non-active-license, and
+revoked contexts.
 
 The licensing surface is implemented: `POST /v1/installations` registers idempotently by
 client install key (optionally registering an Ed25519 device public key);

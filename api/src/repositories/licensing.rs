@@ -805,18 +805,19 @@ pub async fn sync_license_for_subscription(
     Ok(outcome)
 }
 
-struct CustomerAudit<'a> {
-    event_type: &'a str,
-    customer_id: Uuid,
-    target_type: &'a str,
-    target_id: String,
-    reason: &'a str,
-    before_state: Option<Value>,
-    after_state: Option<Value>,
-    correlation_id: Option<&'a str>,
+/// Customer-actor audit record, shared by the licensing and entitlement repositories.
+pub(crate) struct CustomerAudit<'a> {
+    pub(crate) event_type: &'a str,
+    pub(crate) customer_id: Uuid,
+    pub(crate) target_type: &'a str,
+    pub(crate) target_id: String,
+    pub(crate) reason: &'a str,
+    pub(crate) before_state: Option<Value>,
+    pub(crate) after_state: Option<Value>,
+    pub(crate) correlation_id: Option<&'a str>,
 }
 
-async fn write_customer_audit(
+pub(crate) async fn write_customer_audit(
     tx: &mut Transaction<'_, Postgres>,
     record: CustomerAudit<'_>,
 ) -> Result<(), sqlx::Error> {

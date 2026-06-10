@@ -1,9 +1,9 @@
 //! HTTP routing. Public routes need no auth; customer routes resolve a [`CustomerContext`];
 //! admin routes resolve an [`AdminContext`] validated against the separate operator issuer.
 //!
-//! Handlers whose full behavior depends on remaining MVP wiring (entitlement snapshot
-//! assembly, usage, and admin flows) return `NOT_IMPLEMENTED` but still enforce the
-//! correct auth boundary, so the security contract is testable today.
+//! Handlers whose full behavior depends on remaining MVP wiring (usage and admin flows)
+//! return `NOT_IMPLEMENTED` but still enforce the correct auth boundary, so the security
+//! contract is testable today.
 
 pub mod catalog;
 pub mod entitlements;
@@ -68,7 +68,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/v1/devices", get(devices_get))
         .route("/v1/entitlements/current", get(entitlements::current))
-        .route("/v1/entitlements/check", post(entitlements_check))
+        .route("/v1/entitlements/check", post(entitlements::check))
         .route(
             "/v1/entitlements/offline-lease",
             post(entitlements::offline_lease),
@@ -503,11 +503,6 @@ async fn devices_get(
     let customer_id = ctx.require_active()?;
     let devices = licensing::list_devices(&state.pool, customer_id).await?;
     Ok(Json(json!({ "devices": devices })))
-}
-
-async fn entitlements_check(ctx: CustomerContext) -> AppResult<Json<Value>> {
-    ctx.require_active()?;
-    Err(pending("Entitlement check"))
 }
 
 async fn usage_check(ctx: CustomerContext) -> AppResult<Json<Value>> {

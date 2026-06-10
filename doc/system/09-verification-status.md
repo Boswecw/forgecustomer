@@ -37,6 +37,10 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
   fingerprint stability, app version, and device label rules.
 - License sync transitions: issuance on cloud-granting status, past-due grace, suspension,
   expiry, reactivation, and that revoked licenses never auto-lift.
+- Entitlement check-key validation and signed-lease canonical bytes (signature excluded,
+  stable, sign/verify/tamper roundtrip).
+- Entitlement snapshot, check, and offline-lease routes fail closed without auth; the
+  keys endpoint stays public.
 - Stripe webhook signature, parsing, missing/bad signature, and malformed signed-envelope
   rejection behavior.
 - Customer token cannot access admin route.
@@ -55,13 +59,12 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 
 These are intentional MVP gaps and should not be hidden by documentation:
 
-- Entitlement snapshot assembly and offline lease issuance.
 - Usage reserve/commit/release/current route wiring.
 - Admin handler implementations (including license revocation).
 - Deletion workflow endpoints.
 - Remaining outbox emit sites from the still-pending mutations.
 - End-to-end suites with live or mocked Stripe/Supabase/DataForge flows (including
-  DB-backed proofs for device-limit, revocation, and registration idempotency paths).
+  DB-backed proofs for device-limit, revocation, snapshot, and lease paths).
 
 ### Release standard
 

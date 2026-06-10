@@ -258,6 +258,22 @@ paths:
     get:
       tags: [entitlements]
       summary: Current signed entitlement snapshot
+      description: >
+        Assembles the caller's entitlements from the included-plan baseline, current
+        subscription plan, license grants, promotional grants, and admin overrides, with
+        cloud features gated by subscription truth and denials failing closed. The
+        snapshot is Ed25519-signed and stored for audit/replay before being returned.
+        The wire JSON field order matches the canonical signing order.
+      parameters:
+        - name: product_key
+          in: query
+          required: false
+          schema: { type: string, default: authorforge }
+        - name: installation_id
+          in: query
+          required: false
+          description: Bind the snapshot to an owned installation (overrides product_key).
+          schema: { type: string, format: uuid }
       responses:
         "200":
           description: Signed snapshot
@@ -265,19 +281,55 @@ paths:
             application/json:
               schema: { $ref: "./entitlement-v1.schema.json" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: "Unknown product, or installation not found" }
+        "422": { description: Invalid product key or installation id }
   /v1/entitlements/check:
     post:
       tags: [entitlements]
-      summary: Check a specific feature/quota
+      summary: Check a specific feature or quota (advisory, read-only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EntitlementCheckRequest" }
       responses:
+        "200":
+          description: Check result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EntitlementCheckResponse" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Unknown or inactive product }
+        "422": { description: "Provide exactly one valid feature_key or quota_key" }
   /v1/entitlements/offline-lease:
     post:
       tags: [entitlements]
-      summary: Issue a signed offline lease
+      summary: Issue a signed offline lease for an activated installation
+      description: >
+        Fails closed: requires an active installation holding an active activation on an
+        active, unexpired license, with no explicit revocation in scope and a non-revoked
+        device. Lease lifetime is the configured offline grace window. Each issued lease
+        is stored and audited.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [installation_id]
+              properties:
+                installation_id: { type: string, format: uuid }
       responses:
+        "200":
+          description: Signed offline lease (wire field order matches signing order)
+          content:
+            application/json:
+              schema: { $ref: "./lease-v1.schema.json" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { description: Suspended/revoked — no new lease }
+        "403": { description: "Suspended customer, non-active license, or revocation (REVOKED) — no new lease" }
+        "404": { description: Installation not found }
+        "409": { description: "Installation deactivated, or no active activation" }
   /v1/entitlements/keys:
     get:
       tags: [entitlements]
@@ -542,6 +594,45 @@ components:
         already_active:
           type: boolean
           description: True when the pairing was already active (idempotent re-activation).
+    EntitlementCheckRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        product_key:
+          type: ["string", "null"]
+          default: authorforge
+        feature_key:
+          type: ["string", "null"]
+          description: Check a feature. Provide exactly one of feature_key / quota_key.
+          examples: ["authorforge.cloud.enabled"]
+        quota_key:
+          type: ["string", "null"]
+          description: Check a quota meter.
+          examples: ["cloud_tokens.monthly"]
+        amount:
+          type: ["number", "null"]
+          default: 0
+          description: >
+            For quota checks, the amount about to be consumed; 0 asks "is this meter
+            currently within quota".
+    EntitlementCheckResponse:
+      type: object
+      required: [kind, key, allowed]
+      properties:
+        kind: { type: string, enum: [feature, quota] }
+        key: { type: string }
+        allowed:
+          type: boolean
+          description: Fails closed — absent features and over-quota meters are false.
+        value:
+          type: ["boolean", "number", "string", "null"]
+          description: Present for feature checks.
+        limit: { type: ["number", "null"], description: Present for quota checks. }
+        used: { type: ["number", "null"] }
+        reserved: { type: ["number", "null"] }
+        remaining_before: { type: ["number", "null"] }
+        requested: { type: ["number", "null"] }
+        reason: { type: ["string", "null"] }
     StripeWebhookResponse:
       type: object
       required: [received, duplicate, event_id, event_type, status]

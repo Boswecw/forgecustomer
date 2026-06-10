@@ -202,6 +202,41 @@ async fn parameterized_installation_routes_match_and_require_auth() {
 }
 
 #[tokio::test]
+async fn entitlement_routes_require_customer_auth() {
+    let req = Request::builder()
+        .uri("/v1/entitlements/current")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(status_of(req).await, StatusCode::UNAUTHORIZED);
+
+    for uri in ["/v1/entitlements/check", "/v1/entitlements/offline-lease"] {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        assert_eq!(status_of(req).await, StatusCode::UNAUTHORIZED, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn entitlement_keys_remain_public() {
+    let req = Request::builder()
+        .uri("/v1/entitlements/keys")
+        .body(Body::empty())
+        .unwrap();
+    let app = build_router(test_state());
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["schema"], "forge.entitlements.v1");
+    assert_eq!(body["keys"][0]["alg"], "Ed25519");
+}
+
+#[tokio::test]
 async fn parameterized_admin_routes_match_and_require_auth() {
     let id = "9f1c2d3e-4b5a-6789-0abc-def012345678";
     for uri in [

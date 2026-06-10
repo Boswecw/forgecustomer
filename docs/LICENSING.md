@@ -98,8 +98,9 @@ writes a `commercial_audit_event` (`license_issued`, `license_reactivated`,
 - ✅ Revoked devices cannot reactivate silently (`license_revocations` + device status
   checked on every activation).
 - ✅ Customer can deactivate an old installation to free a slot.
-- ✅ Audit records exist for activation, deactivation, and license issuance/sync;
-  revocation audit lands with the admin revoke endpoint (Phase 10).
-- 🔜 Offline-lease issuance (`POST /v1/entitlements/offline-lease`) lands with the
-  Phase 7 entitlement snapshot work; `DELETE /v1/installations/{id}` is deferred
+- ✅ Audit records exist for activation, deactivation, license issuance/sync, and lease
+  issuance; revocation audit lands with the admin revoke endpoint (Phase 10).
+- ✅ Offline-lease issuance (`POST /v1/entitlements/offline-lease`) is live — signed
+  `forge.lease.v1` documents, denied for suspended/revoked contexts (see
+  `docs/ENTITLEMENTS.md`). `DELETE /v1/installations/{id}` remains deferred
   (deactivate covers the MVP).

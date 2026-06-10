@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.boswell.example/forge/lease-v1.schema.json",
+  "title": "ForgeCustomer Signed Offline Lease",
+  "description": "Ed25519-signed offline lease issued to an activated installation. The signature covers the canonical JSON of every field except `signature`; the wire field order matches the canonical signing order.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "lease_id",
+    "customer_id",
+    "license_id",
+    "installation_id",
+    "product",
+    "issued_at",
+    "expires_at",
+    "key_id",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "forge.lease.v1"
+    },
+    "lease_id": { "type": "string", "format": "uuid" },
+    "customer_id": { "type": "string", "description": "ForgeCustomer business customer id" },
+    "license_id": { "type": "string", "format": "uuid" },
+    "installation_id": { "type": "string", "format": "uuid" },
+    "product": { "type": "string", "examples": ["authorforge"] },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "key_id": {
+      "type": "string",
+      "description": "Identifies the verifying key; resolve via GET /v1/entitlements/keys",
+      "examples": ["entitlement-key-1"]
+    },
+    "signature": {
+      "type": "string",
+      "description": "Base64 Ed25519 signature over the lease with `signature` cleared"
+    }
+  }
+}

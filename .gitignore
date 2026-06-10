@@ -1,0 +1,24 @@
+# Rust
+/target
+**/target
+Cargo.lock.orig
+*.rs.bk
+
+# Environments & secrets — never commit real secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!**/*.example.key
+
+# Supabase local
+supabase/.branches
+supabase/.temp
+supabase/.env
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/

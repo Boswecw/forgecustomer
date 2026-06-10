@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["api"]
+
+[workspace.package]
+edition = "2021"
+license = "Proprietary"
+authors = ["Boswell Digital Solutions"]

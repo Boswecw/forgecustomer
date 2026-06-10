@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.boswell.example/forge/events/outbox-event-v1.schema.json",
+  "title": "ForgeCustomer Sanitized Outbox Event",
+  "description": "Envelope for events delivered to DataForge. Payloads are sanitized: no PII, secrets, payment details, or creative content may appear.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_type", "delivery_key", "payload"],
+  "properties": {
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "customer_created",
+        "customer_suspended",
+        "customer_restored",
+        "subscription_changed",
+        "license_activated",
+        "license_revoked",
+        "installation_registered",
+        "quota_threshold_reached",
+        "usage_commit_failed",
+        "customer_anonymized"
+      ]
+    },
+    "delivery_key": {
+      "type": "string",
+      "description": "Idempotent delivery key; consumers dedupe on this."
+    },
+    "payload": {
+      "type": "object",
+      "description": "Sanitized event body. MUST NOT contain any of the prohibited keys.",
+      "not": {
+        "anyOf": [
+          { "required": ["email"] },
+          { "required": ["full_name"] },
+          { "required": ["name"] },
+          { "required": ["display_name"] },
+          { "required": ["stripe_customer_id"] },
+          { "required": ["payment_method"] },
+          { "required": ["card"] },
+          { "required": ["raw_payload"] },
+          { "required": ["password"] },
+          { "required": ["session"] },
+          { "required": ["manuscript"] },
+          { "required": ["prompt"] },
+          { "required": ["content"] }
+        ]
+      }
+    }
+  }
+}

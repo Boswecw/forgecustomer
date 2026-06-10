@@ -21,6 +21,11 @@
   admin route. Admin authorization validates trusted issuer, operator identity, role /
   capability, expiration, audience, and optional device trust. No client-provided claim
   promotes a customer to admin.
+- **Forge Command** is the operator console and the only intended consumer of
+  `/v1/admin/*`; it works through these APIs and never bypasses ForgeCustomer mutation
+  paths. Role policy (fail closed): admin **reads** require any valid operator token;
+  admin **mutations** require the `admin` role in the token's `roles` claim, plus a
+  written reason recorded in commercial audit with the operator id as actor.
 
 ## Customer access rules
 

@@ -846,7 +846,8 @@ pub(crate) async fn write_customer_audit(
     Ok(())
 }
 
-async fn write_outbox(
+/// Sanitized outbox insert, shared by the licensing/admin repositories.
+pub(crate) async fn write_outbox(
     tx: &mut Transaction<'_, Postgres>,
     event_type: &str,
     delivery_key: String,

@@ -88,9 +88,15 @@ Current route surface:
 - `POST /v1/admin/usage/adjust`
 - `GET /v1/admin/audit`
 
-Admin handlers are intentionally pending. Each eventual admin mutation must require a
-reason, write commercial audit, preserve append-only ledgers, and use compensating events
-for corrections.
+The admin surface is implemented and is the Forge Command integration point. Reads
+require any valid operator token; mutations require the `admin` role and a written
+reason, write operator-actor commercial audit, preserve append-only ledgers (usage
+corrections are compensating `adjustment` events behind a required idempotency key), and
+queue the contract-defined outbox events (`customer_suspended`, `customer_restored`,
+`license_revoked`). Subscription resync pulls current truth from the Stripe API,
+reprojects it, syncs the linked license, and advances the event watermark so stale
+out-of-order webhooks are subsequently skipped. Suspend/restore and revoke are
+idempotent and report `changed: false` on replay.
 
 ### Error contract
 

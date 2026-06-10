@@ -32,6 +32,8 @@ fn test_state() -> AppState {
     // A throwaway base64 32-byte Ed25519 seed.
     let seed = base64_seed();
     std::env::set_var("DATABASE_URL", "postgres://user@127.0.0.1:1/none");
+    // The unreachable test database must fail fast, not wait out the default timeout.
+    std::env::set_var("DATABASE_ACQUIRE_TIMEOUT_SECS", "1");
     std::env::set_var("SUPABASE_JWT_ISSUER", SUPA_ISS);
     std::env::set_var("SUPABASE_JWT_AUDIENCE", SUPA_AUD);
     std::env::set_var("SUPABASE_JWT_SECRET", SUPA_SECRET);
@@ -118,8 +120,99 @@ async fn valid_operator_token_clears_admin_auth() {
         .header("authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
-    // Auth passes; the handler itself is pending → 501 (NOT 401/403).
-    assert_eq!(status_of(req).await, StatusCode::NOT_IMPLEMENTED);
+    // Auth passes (NOT 401/403); the listing then fails on the unreachable test
+    // database, proving the boundary sits in front of the data access.
+    assert_eq!(status_of(req).await, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn admin_mutations_require_admin_role() {
+    // A valid operator token WITHOUT the `admin` role: reads pass auth, mutations 403.
+    let token = jwt(
+        json!({ "sub": "operator-7", "roles": ["support"],
+                "iss": ADMIN_ISS, "aud": ADMIN_AUD, "exp": now() + 3600 }),
+        ADMIN_SECRET,
+    );
+    let id = "9f1c2d3e-4b5a-6789-0abc-def012345678";
+    for uri in [
+        format!("/v1/admin/customers/{id}/suspend"),
+        format!("/v1/admin/customers/{id}/restore"),
+        format!("/v1/admin/subscriptions/{id}/resync"),
+        format!("/v1/admin/licenses/{id}/revoke"),
+        "/v1/admin/licenses".to_string(),
+        "/v1/admin/entitlements/override".to_string(),
+        "/v1/admin/usage/adjust".to_string(),
+    ] {
+        // A superset body that deserializes for every mutation route (serde ignores
+        // unknown fields), so the role gate — not body validation — is what rejects.
+        let body = json!({
+            "reason": "support cleanup",
+            "customer_id": "9f1c2d3e-4b5a-6789-0abc-def012345678",
+            "meter_key": "cloud_tokens",
+            "amount": -100,
+            "feature_key": "authorforge.cloud.enabled",
+            "value": true
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri(&uri)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .header("idempotency-key", "role-check-1")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        assert_eq!(status_of(req).await, StatusCode::FORBIDDEN, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn admin_mutations_validate_reason_before_db_write() {
+    let token = jwt(
+        json!({ "sub": "operator-7", "roles": ["admin"],
+                "iss": ADMIN_ISS, "aud": ADMIN_AUD, "exp": now() + 3600 }),
+        ADMIN_SECRET,
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/admin/customers/9f1c2d3e-4b5a-6789-0abc-def012345678/suspend")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(json!({ "reason": "x" }).to_string()))
+        .unwrap();
+
+    let app = build_router(test_state());
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "VALIDATION_FAILED");
+    assert_eq!(body["error"]["details"]["field"], "reason");
+}
+
+#[tokio::test]
+async fn admin_usage_adjust_requires_idempotency_key() {
+    let token = jwt(
+        json!({ "sub": "operator-7", "roles": ["admin"],
+                "iss": ADMIN_ISS, "aud": ADMIN_AUD, "exp": now() + 3600 }),
+        ADMIN_SECRET,
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/admin/usage/adjust")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "customer_id": "9f1c2d3e-4b5a-6789-0abc-def012345678",
+                "meter_key": "cloud_tokens",
+                "amount": -100,
+                "reason": "refund correction"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    assert_eq!(status_of(req).await, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

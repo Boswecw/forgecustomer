@@ -388,38 +388,197 @@ paths:
   /v1/admin/customers:
     get:
       tags: [admin]
-      summary: List customers (operator only)
+      summary: List customers (operator read; Forge Command console)
       security: [{ adminAuth: [] }]
+      parameters:
+        - { name: email, in: query, required: false, schema: { type: string } }
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [pending, active, suspended, closed, anonymized] }
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 25, maximum: 100 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, default: 0 } }
       responses:
+        "200": { description: "Customer list (id, type, display name, status, primary email)" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
   /v1/admin/customers/{id}/suspend:
     post:
       tags: [admin]
-      summary: Suspend a customer (reason required)
+      summary: Suspend a customer (requires `admin` role; reason required; idempotent)
       security: [{ adminAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/PathId" }]
-      responses: { "401": { $ref: "#/components/responses/Unauthorized" } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminReasonRequest" }
+      responses:
+        "200": { description: "Status outcome { customer_id, from_status, status, changed }" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Customer not found }
+        "422": { description: Reason validation failed }
   /v1/admin/customers/{id}/restore:
     post:
       tags: [admin]
-      summary: Restore a customer (reason required)
+      summary: Restore a customer (requires `admin` role; reason required; idempotent)
       security: [{ adminAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/PathId" }]
-      responses: { "401": { $ref: "#/components/responses/Unauthorized" } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminReasonRequest" }
+      responses:
+        "200": { description: "Status outcome { customer_id, from_status, status, changed }" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Customer not found }
   /v1/admin/subscriptions/{id}/resync:
     post:
       tags: [admin]
-      summary: Resync a subscription from Stripe
+      summary: Resync a subscription from Stripe (requires `admin` role)
+      description: >
+        Pulls current subscription truth from the Stripe API, reprojects it, syncs the
+        linked license, and writes operator-actor audit. Sets the projection's event
+        watermark to now so stale out-of-order webhooks are skipped afterwards.
       security: [{ adminAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/PathId" }]
-      responses: { "401": { $ref: "#/components/responses/Unauthorized" } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminReasonRequest" }
+      responses:
+        "200": { description: "Resync outcome { subscription_id, status, changed, license_change }" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Subscription not found (locally or at Stripe) }
+        "503": { description: Stripe unavailable }
+  /v1/admin/licenses:
+    post:
+      tags: [admin]
+      summary: Issue an operator license (requires `admin` role)
+      security: [{ adminAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [customer_id, reason]
+              properties:
+                customer_id: { type: string, format: uuid }
+                product_key: { type: ["string", "null"], default: authorforge }
+                device_limit: { type: ["integer", "null"], default: 1, minimum: 0, maximum: 10000 }
+                expires_at: { type: ["string", "null"], format: date-time }
+                reason: { type: string, minLength: 3, maxLength: 500 }
+      responses:
+        "200": { description: Issued license }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Customer or product not found }
+        "422": { description: Validation failed }
+  /v1/admin/licenses/{id}/revoke:
+    post:
+      tags: [admin]
+      summary: Revoke a license (requires `admin` role; reason required; idempotent)
+      description: >
+        Sets the license to revoked and writes an explicit license_revocations record;
+        revocation blocks activation and leases and is never lifted by subscription sync.
+      security: [{ adminAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminReasonRequest" }
+      responses:
+        "200": { description: "Revocation outcome { license_id, status, changed }" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: License not found }
+  /v1/admin/entitlements/override:
+    post:
+      tags: [admin]
+      summary: Set or clear an entitlement override (requires `admin` role)
+      description: >
+        Provide exactly one of feature_key / quota_key. A value sets the override
+        (deactivating prior active overrides for the same key); omitting the value (or
+        sending null) clears the key back to plan/grant evaluation.
+      security: [{ adminAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [customer_id, reason]
+              properties:
+                customer_id: { type: string, format: uuid }
+                product_key: { type: ["string", "null"], default: authorforge }
+                feature_key: { type: ["string", "null"] }
+                quota_key: { type: ["string", "null"] }
+                value:
+                  type: ["boolean", "number", "string", "null"]
+                  description: Omit/null to clear the override(s) for the key.
+                expires_at: { type: ["string", "null"], format: date-time }
+                reason: { type: string, minLength: 3, maxLength: 500 }
+      responses:
+        "200": { description: "Override outcome { override_id, cleared_overrides, key }" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Customer or product not found }
+        "422": { description: Validation failed }
+  /v1/admin/usage/adjust:
+    post:
+      tags: [admin]
+      summary: Append a compensating usage adjustment (requires `admin` role)
+      description: >
+        Appends a signed adjustment event to the append-only usage ledger and folds it
+        into the period total. Requires Idempotency-Key; replays return the original
+        event without re-applying. Corrections are compensating events, never edits.
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [customer_id, meter_key, amount, reason]
+              properties:
+                customer_id: { type: string, format: uuid }
+                meter_key: { type: string, examples: ["cloud_tokens"] }
+                amount:
+                  type: number
+                  description: Signed, non-zero; negative amounts compensate prior usage.
+                period_key: { type: ["string", "null"], description: "YYYY-MM; defaults to the current month." }
+                reason: { type: string, minLength: 3, maxLength: 500 }
+      responses:
+        "200": { description: "Adjustment outcome { usage_event_id, amount, replayed }" }
+        "400": { description: Missing Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Customer or meter not found }
+        "422": { description: Validation failed }
   /v1/admin/audit:
     get:
       tags: [admin]
-      summary: Read commercial audit events
+      summary: Read commercial audit events (operator read)
       security: [{ adminAuth: [] }]
-      responses: { "401": { $ref: "#/components/responses/Unauthorized" } }
+      parameters:
+        - { name: customer_id, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: event_type, in: query, required: false, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 50, maximum: 200 } }
+      responses:
+        "200": { description: "Audit events, newest first" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 components:
   securitySchemes:
     customerAuth:
@@ -594,6 +753,16 @@ components:
         already_active:
           type: boolean
           description: True when the pairing was already active (idempotent re-activation).
+    AdminReasonRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+          description: Written justification; recorded in the commercial audit trail.
     EntitlementCheckRequest:
       type: object
       additionalProperties: false

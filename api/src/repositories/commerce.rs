@@ -520,7 +520,7 @@ async fn apply_subscription_change(
         },
     )
     .await?;
-    write_subscription_outbox(tx, webhook_event_id, event, &row).await?;
+    write_subscription_outbox(tx, &webhook_event_id.to_string(), event.created_at(), &row).await?;
     sync_license_from_subscription_truth(tx, event, &row, change.status).await?;
 
     Ok(())
@@ -640,7 +640,8 @@ async fn apply_invoice_change(
             },
         )
         .await?;
-        write_subscription_outbox(tx, webhook_event_id, event, &row).await?;
+        write_subscription_outbox(tx, &webhook_event_id.to_string(), event.created_at(), &row)
+            .await?;
         sync_license_from_subscription_truth(tx, event, &row, invoice.status).await?;
     } else {
         write_audit(
@@ -906,8 +907,8 @@ async fn plan_descriptor(
 
 async fn write_subscription_outbox(
     tx: &mut Transaction<'_, Postgres>,
-    webhook_event_id: Uuid,
-    event: &ParsedStripeEvent,
+    delivery_discriminator: &str,
+    occurred_at: Option<DateTime<Utc>>,
     subscription: &SubscriptionProjectionRow,
 ) -> Result<(), sqlx::Error> {
     let plan = plan_descriptor(tx, subscription.plan_version_id).await?;
@@ -921,10 +922,10 @@ async fn write_subscription_outbox(
         "grants_cloud": matches!(subscription.status.as_str(), "trialing" | "active"),
         "cancel_at_period_end": subscription.cancel_at_period_end,
         "current_period_end": subscription.current_period_end,
-        "occurred_at": event.created_at(),
+        "occurred_at": occurred_at,
     }));
     let delivery_key = format!(
-        "subscription_changed:{}:{webhook_event_id}",
+        "subscription_changed:{}:{delivery_discriminator}",
         subscription.id
     );
 
@@ -975,6 +976,173 @@ fn is_stale_event(incoming: Option<DateTime<Utc>>, existing: Option<DateTime<Utc
         (Some(incoming), Some(existing)) => incoming < existing,
         _ => false,
     }
+}
+
+// --- Admin resync (operator-driven; Forge Command surface) ---------------------
+
+/// Subscription identifiers needed to pull current truth from Stripe.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ResyncTarget {
+    pub id: Uuid,
+    pub stripe_subscription_id: String,
+}
+
+pub async fn find_subscription_for_resync(
+    pool: &PgPool,
+    subscription_id: Uuid,
+) -> Result<Option<ResyncTarget>, sqlx::Error> {
+    sqlx::query_as::<_, ResyncTarget>(
+        "select id, stripe_subscription_id from public.subscriptions where id = $1",
+    )
+    .bind(subscription_id)
+    .fetch_optional(pool)
+    .await
+}
+
+#[derive(Debug, Clone)]
+pub struct AdminResyncOutcome {
+    pub subscription_id: Uuid,
+    pub customer_id: Uuid,
+    pub status: String,
+    pub changed: bool,
+    pub license_change: Option<&'static str>,
+}
+
+/// Apply freshly fetched Stripe subscription truth on an operator's behalf: reproject the
+/// subscription, sync the linked license, and write operator-actor audit for both. The
+/// projection's `stripe_event_at` is set to now so older out-of-order webhooks arriving
+/// later are recognized as stale. The `subscription_changed` outbox event is only queued
+/// when the projection actually changed.
+pub async fn apply_admin_resync(
+    pool: &PgPool,
+    subscription_id: Uuid,
+    change: &StripeSubscriptionChange,
+    operator_id: &str,
+    reason: &str,
+    correlation_id: Option<&str>,
+) -> Result<Option<AdminResyncOutcome>, StripeWebhookApplyError> {
+    let mut tx = pool.begin().await?;
+
+    let existing = sqlx::query_as::<_, ExistingSubscriptionRow>(
+        r#"
+        select id, customer_id, plan_version_id, status, current_period_end,
+               cancel_at_period_end, stripe_event_at
+        from public.subscriptions
+        where id = $1
+        for update
+        "#,
+    )
+    .bind(subscription_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+
+    let customer_id = resolve_customer_id(
+        &mut tx,
+        change.customer_id,
+        change.stripe_customer_id.as_deref(),
+        Some(&existing),
+    )
+    .await?
+    .ok_or(StripeWebhookApplyError::MissingCustomer)?;
+    let plan_version_id = resolve_plan_version_id(
+        &mut tx,
+        change.plan_version_id,
+        change.stripe_price_id.as_deref(),
+        Some(&existing),
+    )
+    .await?
+    .ok_or(StripeWebhookApplyError::MissingPlanVersion)?;
+    let billing_account_id = ensure_billing_account(&mut tx, customer_id).await?;
+    link_stripe_customer(
+        &mut tx,
+        billing_account_id,
+        change.stripe_customer_id.as_deref(),
+    )
+    .await?;
+
+    let before = existing_subscription_state(&existing);
+    let now = Utc::now();
+    let row = upsert_subscription_projection(
+        &mut tx,
+        SubscriptionProjectionInput {
+            existing: Some(&existing),
+            customer_id,
+            billing_account_id,
+            plan_version_id,
+            stripe_subscription_id: &change.stripe_subscription_id,
+            status: change.status,
+            current_period_start: change.current_period_start,
+            current_period_end: change.current_period_end,
+            cancel_at_period_end: change.cancel_at_period_end,
+            stripe_event_at: Some(now),
+        },
+    )
+    .await?;
+    let after = subscription_projection_state(&row);
+    let changed = before != after;
+
+    crate::repositories::admin::write_operator_audit(
+        &mut tx,
+        crate::repositories::admin::OperatorAudit {
+            event_type: "subscription_resynced",
+            operator_id,
+            customer_id: Some(row.customer_id),
+            target_type: "subscription",
+            target_id: row.id.to_string(),
+            reason,
+            before_state: Some(before),
+            after_state: Some(after),
+            correlation_id,
+        },
+    )
+    .await?;
+    if changed {
+        write_subscription_outbox(
+            &mut tx,
+            &format!("resync:{}", Uuid::new_v4()),
+            Some(now),
+            &row,
+        )
+        .await?;
+    }
+
+    let sync = licensing::sync_license_for_subscription(
+        &mut tx,
+        row.customer_id,
+        row.id,
+        row.plan_version_id,
+        change.status,
+    )
+    .await?;
+    if let Some(sync) = &sync {
+        crate::repositories::admin::write_operator_audit(
+            &mut tx,
+            crate::repositories::admin::OperatorAudit {
+                event_type: sync.audit_event_type(),
+                operator_id,
+                customer_id: Some(row.customer_id),
+                target_type: "license",
+                target_id: sync.license_id.to_string(),
+                reason,
+                before_state: sync.before_state(),
+                after_state: Some(sync.after_state()),
+                correlation_id,
+            },
+        )
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(Some(AdminResyncOutcome {
+        subscription_id: row.id,
+        customer_id: row.customer_id,
+        status: row.status.clone(),
+        changed,
+        license_change: sync.map(|sync| sync.audit_event_type()),
+    }))
 }
 
 fn existing_subscription_state(row: &ExistingSubscriptionRow) -> Value {

@@ -120,6 +120,19 @@ impl AdminContext {
     pub fn has_role(&self, role: &str) -> bool {
         self.roles.iter().any(|r| r == role)
     }
+
+    /// Require an operator role for privileged admin mutations (fail closed). Forge
+    /// Command mints operator tokens; reads need any valid operator token, mutations
+    /// need the named role.
+    pub fn require_role(&self, role: &str) -> Result<(), AppError> {
+        if self.has_role(role) {
+            Ok(())
+        } else {
+            Err(AppError::forbidden(format!(
+                "This operation requires the '{role}' operator role."
+            )))
+        }
+    }
 }
 
 /// Extract a bearer token from an `Authorization` header value.

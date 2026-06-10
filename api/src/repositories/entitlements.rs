@@ -274,11 +274,15 @@ pub async fn load_entitlement_inputs(
         })
         .collect();
 
+    // Revocation denial follows the customer's *effective* license: the most recently
+    // issued active one when any exists (matching activation's selection), otherwise the
+    // most recent license of any status. A revoked secondary license must not deny a
+    // customer who still holds an active grant.
     inputs.revoked = sqlx::query_scalar::<_, Option<String>>(
         r#"
         select status from public.licenses
         where customer_id = $1 and product_id = $2
-        order by issued_at desc
+        order by (status = 'active') desc, issued_at desc
         limit 1
         "#,
     )

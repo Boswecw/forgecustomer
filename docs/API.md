@@ -164,3 +164,45 @@ The response returns the Stripe-hosted checkout URL and records
 `stripe_checkout_session_id` in `checkout_sessions` with status `created`. This does
 **not** activate entitlements; verified Stripe webhooks remain the only path that changes
 subscription truth.
+
+## Admin API (Forge Command)
+
+The `/v1/admin/*` surface is the integration point for **Forge Command**, the operator
+console. Forge Command mints operator JWTs from the dedicated issuer
+(`ADMIN_JWT_ISSUER`/`ADMIN_JWT_AUDIENCE`) and works exclusively through these endpoints —
+it never bypasses ForgeCustomer's mutation paths or touches the database directly.
+
+Authorization is two-tier and fails closed:
+
+- **Reads** (`GET /v1/admin/customers`, `GET /v1/admin/audit`) require any valid operator
+  token.
+- **Mutations** additionally require the `admin` role in the token's `roles` claim and a
+  written `reason` (3–500 chars) that lands in the commercial audit trail with the
+  operator id as the actor.
+
+Live endpoints:
+
+- `GET /v1/admin/customers` — lookup by exact email and/or status, paged.
+- `POST /v1/admin/customers/{id}/suspend` / `restore` — idempotent status changes that
+  write `customer_status_history`, audit, and the sanitized
+  `customer_suspended`/`customer_restored` outbox events. Suspension fails the customer
+  closed at the auth boundary (`CUSTOMER_SUSPENDED`).
+- `POST /v1/admin/subscriptions/{id}/resync` — pulls current truth from the Stripe API
+  (`STRIPE_API_BASE` is overridable for mocked tests), reprojects the subscription,
+  syncs the linked license, and advances the event watermark so stale out-of-order
+  webhooks are skipped afterwards. Queues `subscription_changed` only when the
+  projection actually changed.
+- `POST /v1/admin/licenses` — operator-issued license (bounded `device_limit`, optional
+  expiry); subscription-linked licenses remain webhook-managed.
+- `POST /v1/admin/licenses/{id}/revoke` — idempotent revocation: sets `revoked`, writes
+  the explicit `license_revocations` record (blocks activation/leases; never lifted by
+  subscription sync), audits, and queues the `license_revoked` outbox event.
+- `POST /v1/admin/entitlements/override` — sets a typed feature/quota override
+  (deactivating prior active overrides for the same key) or clears the key when the
+  value is omitted.
+- `POST /v1/admin/usage/adjust` — appends a signed compensating adjustment to the
+  append-only usage ledger and folds it into the period total. Requires
+  `Idempotency-Key`; replays return the original event without re-applying. Corrections
+  are compensating events, never edits.
+- `GET /v1/admin/audit` — commercial audit events, filterable by customer and event
+  type, newest first.

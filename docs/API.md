@@ -111,6 +111,25 @@ See `docs/LICENSING.md` for the full rules. Summary of the live endpoints:
   active activations, freeing device slots (idempotent). Writes an
   `installation_deactivated` audit event.
 
+## Entitlements: snapshots, checks, offline leases
+
+See `docs/ENTITLEMENTS.md` for the evaluation model. Summary of the live endpoints:
+
+- `GET /v1/entitlements/current` assembles, signs (Ed25519), stores, and returns the
+  caller's entitlement snapshot (`forge.entitlements.v1`). Optional `?installation_id=`
+  binds the snapshot to an owned installation; `?product_key=` selects the product
+  (default `authorforge`). The wire field order matches the canonical signing order so
+  clients can verify the signature from the received document and the keys published at
+  `GET /v1/entitlements/keys`.
+- `POST /v1/entitlements/check` is an advisory, read-only check of exactly one
+  `feature_key` or `quota_key` (with optional `amount`). Fails closed: absent features
+  and over-quota meters answer `allowed: false`.
+- `POST /v1/entitlements/offline-lease` issues a signed `forge.lease.v1` document for an
+  activated installation, valid for the offline grace window. Fails closed on
+  deactivated installations (`409`), missing activations (`409`), non-active licenses
+  (`403 FORBIDDEN`), and revoked devices/licenses/explicit revocation records
+  (`403 REVOKED`). Every lease is stored and audited.
+
 ## Stripe webhook processing
 
 `POST /v1/webhooks/stripe` verifies `Stripe-Signature` with `STRIPE_WEBHOOK_SECRET`

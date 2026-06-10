@@ -83,9 +83,24 @@ product defaults
 Suspension and revocation always deny cloud/new-lease capabilities. Local product access
 is evaluated independently and must not be revoked by commercial state.
 
-`Signer25519` signs canonical entitlement snapshots and `VerifyingKeyRing` verifies them.
-`GET /v1/entitlements/keys` publishes active verification keys. Snapshot assembly from
-plan/grant/override database rows remains pending.
+Implemented behavior:
+
+- Snapshot assembly maps the layers onto data: the product's `<product>_included` plan
+  is the baseline; the current subscription (cloud-granting preferred, canceled excluded)
+  contributes its plan version; license grants come from active unexpired licenses;
+  promotional grants and admin overrides apply last. Quota limits merge in the same
+  order, and monthly meters surface committed usage as `<meter>.used`.
+- Suspension is rejected at the auth boundary (`CUSTOMER_SUSPENDED`); a revoked latest
+  license forces cloud features off in evaluation.
+- `Signer25519` signs canonical snapshots and leases; `VerifyingKeyRing` verifies and
+  `GET /v1/entitlements/keys` publishes active verification keys. Issued snapshots are
+  stored in `entitlement_snapshots`; responses preserve the canonical field order so
+  clients can verify the signature from the received document.
+- Advisory feature/quota checks are read-only and fail closed.
+- Offline leases (`forge.lease.v1`) are issued only to active installations holding an
+  active activation on an active, unexpired license, with no revocation in scope; each
+  issuance stores the lease row and a `lease_issued` audit event transactionally. Lease
+  lifetime is the configured offline grace window.
 
 ### Usage and quotas
 

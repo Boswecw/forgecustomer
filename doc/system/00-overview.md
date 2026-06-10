@@ -33,6 +33,12 @@ Implemented today:
   identity), license activation with device-limit and revocation enforcement, heartbeat,
   deactivation, and read-own installation/device/license listings, with audit and
   sanitized `installation_registered` / `license_activated` outbox emission.
+- Entitlement snapshot assembly from included-plan baseline, subscription plan, license
+  grants, promotional grants, and admin overrides — evaluated fail-closed, Ed25519
+  signed, stored for audit/replay, and returned with wire field order matching the
+  canonical signing order.
+- Advisory feature/quota checks and signed offline-lease issuance (`forge.lease.v1`)
+  for activated installations, denied for suspended/revoked contexts.
 - Public product and plan catalog endpoints backed by SQLx repositories.
 - Customer and admin JWT extraction boundaries.
 - Public entitlement key endpoint and Ed25519 signing/key-ring services.
@@ -46,7 +52,6 @@ Implemented today:
 
 Still pending before AuthorForge can rely on the service end to end:
 
-- Entitlement snapshot assembly from plan/grants/overrides and offline-lease issuance.
 - Usage reserve/commit/release/current endpoint wiring.
 - Admin handler implementations (including license revocation).
 - Remaining outbox emit sites and deletion workflow endpoints.

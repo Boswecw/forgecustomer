@@ -70,6 +70,7 @@ Contracts live under `contracts/`:
 
 - `openapi.yaml` for HTTP routes.
 - `entitlement-v1.schema.json` for signed entitlement snapshots.
+- `lease-v1.schema.json` for signed offline leases.
 - `events/outbox-event-v1.schema.json` for DataForge outbox delivery envelopes.
 
 CI validates OpenAPI with Redocly and checks JSON schema files parse.

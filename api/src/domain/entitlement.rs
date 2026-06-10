@@ -52,6 +52,25 @@ fn is_cloud_feature(key: &str) -> bool {
         || key.ends_with(".premium.enabled")
 }
 
+/// Validate a customer-supplied feature/quota key for the check endpoint: dotted
+/// lowercase identifiers only (e.g. `authorforge.cloud.enabled`, `cloud_tokens.monthly`).
+pub fn clean_entitlement_key(value: &str) -> Result<String, &'static str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("key is required");
+    }
+    if value.len() > 120 {
+        return Err("key must be at most 120 characters");
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err("key must contain only letters, numbers, '.', '_', or '-'");
+    }
+    Ok(value.to_string())
+}
+
 /// Evaluate entitlements deterministically.
 pub fn evaluate(inputs: &EntitlementInputs) -> EntitlementResult {
     let mut features: BTreeMap<String, FeatureValue> = BTreeMap::new();
@@ -155,6 +174,21 @@ mod tests {
         inputs.revoked = true;
         let r = evaluate(&inputs);
         assert_eq!(r.features.get("authorforge.cloud.enabled"), Some(&b(false)));
+    }
+
+    #[test]
+    fn entitlement_key_validation() {
+        assert_eq!(
+            clean_entitlement_key(" authorforge.cloud.enabled "),
+            Ok("authorforge.cloud.enabled".to_string())
+        );
+        assert_eq!(
+            clean_entitlement_key("cloud_tokens.monthly"),
+            Ok("cloud_tokens.monthly".to_string())
+        );
+        assert!(clean_entitlement_key("").is_err());
+        assert!(clean_entitlement_key("bad key with spaces").is_err());
+        assert!(clean_entitlement_key("inject';--").is_err());
     }
 
     #[test]

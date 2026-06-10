@@ -1,0 +1,268 @@
+openapi: 3.1.0
+info:
+  title: ForgeCustomer API
+  version: 0.1.0
+  description: >
+    Customer, commerce, licensing, entitlement, installation and usage authority for
+    Boswell Digital Solutions products. Customer routes accept Supabase JWTs; admin routes
+    require operator JWTs from a separate issuer. See docs/API.md.
+servers:
+  - url: https://api.forgecustomer.example
+    description: production (placeholder)
+tags:
+  - name: health
+  - name: catalog
+  - name: account
+  - name: subscriptions
+  - name: licensing
+  - name: entitlements
+  - name: usage
+  - name: checkout
+  - name: webhooks
+  - name: admin
+paths:
+  /v1/health:
+    get:
+      tags: [health]
+      summary: Liveness
+      security: []
+      responses:
+        "200": { description: Process is up }
+  /v1/ready:
+    get:
+      tags: [health]
+      summary: Readiness (database reachable)
+      security: []
+      responses:
+        "200": { description: Ready }
+        "503": { description: Not ready }
+  /v1/version:
+    get:
+      tags: [health]
+      summary: Build/version info
+      security: []
+      responses:
+        "200": { description: Version info }
+  /v1/products:
+    get:
+      tags: [catalog]
+      summary: List active products
+      security: []
+      responses:
+        "200": { description: Product list }
+  /v1/plans:
+    get:
+      tags: [catalog]
+      summary: List active plans
+      security: []
+      responses:
+        "200": { description: Plan list }
+  /v1/account:
+    get:
+      tags: [account]
+      summary: Get own account summary
+      responses:
+        "200": { description: Account summary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/subscriptions:
+    get:
+      tags: [subscriptions]
+      summary: Own subscription summary
+      responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/licenses:
+    get:
+      tags: [licensing]
+      summary: Own licenses
+      responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/installations:
+    get:
+      tags: [licensing]
+      summary: List installations
+      responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [licensing]
+      summary: Register an installation (idempotent)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/installations/{id}/activate:
+    post:
+      tags: [licensing]
+      summary: Activate a license on an installation (enforces device limit)
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { description: Device limit reached }
+  /v1/installations/{id}/heartbeat:
+    post:
+      tags: [licensing]
+      summary: Installation heartbeat
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/installations/{id}/deactivate:
+    post:
+      tags: [licensing]
+      summary: Deactivate an installation
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/devices:
+    get:
+      tags: [licensing]
+      summary: Own devices
+      responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/entitlements/current:
+    get:
+      tags: [entitlements]
+      summary: Current signed entitlement snapshot
+      responses:
+        "200":
+          description: Signed snapshot
+          content:
+            application/json:
+              schema: { $ref: "./entitlement-v1.schema.json" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/entitlements/check:
+    post:
+      tags: [entitlements]
+      summary: Check a specific feature/quota
+      responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/entitlements/offline-lease:
+    post:
+      tags: [entitlements]
+      summary: Issue a signed offline lease
+      responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: Suspended/revoked — no new lease }
+  /v1/entitlements/keys:
+    get:
+      tags: [entitlements]
+      summary: Published verification keys (for snapshot verification)
+      security: []
+      responses:
+        "200": { description: Key set }
+  /v1/usage/check:
+    post: { tags: [usage], summary: Check quota, responses: { "401": { $ref: "#/components/responses/Unauthorized" } } }
+  /v1/usage/reserve:
+    post:
+      tags: [usage]
+      summary: Reserve usage
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses: { "401": { $ref: "#/components/responses/Unauthorized" }, "402": { description: Quota exceeded } }
+  /v1/usage/commit:
+    post:
+      tags: [usage]
+      summary: Commit reserved/direct usage
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses: { "401": { $ref: "#/components/responses/Unauthorized" } }
+  /v1/usage/release:
+    post: { tags: [usage], summary: Release a reservation, responses: { "401": { $ref: "#/components/responses/Unauthorized" } } }
+  /v1/usage/current:
+    get: { tags: [usage], summary: Current usage totals, responses: { "401": { $ref: "#/components/responses/Unauthorized" } } }
+  /v1/checkout:
+    post:
+      tags: [checkout]
+      summary: Create a Stripe Checkout session
+      responses:
+        "200": { description: Redirect URL (does NOT activate entitlements) }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/webhooks/stripe:
+    post:
+      tags: [webhooks]
+      summary: Stripe webhook receiver (signature-verified; idempotent)
+      security: []
+      responses:
+        "200": { description: Acknowledged }
+        "400": { description: Invalid signature }
+  /v1/admin/customers:
+    get:
+      tags: [admin]
+      summary: List customers (operator only)
+      security: [{ adminAuth: [] }]
+      responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/customers/{id}/suspend:
+    post:
+      tags: [admin]
+      summary: Suspend a customer (reason required)
+      security: [{ adminAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses: { "401": { $ref: "#/components/responses/Unauthorized" } }
+  /v1/admin/customers/{id}/restore:
+    post:
+      tags: [admin]
+      summary: Restore a customer (reason required)
+      security: [{ adminAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses: { "401": { $ref: "#/components/responses/Unauthorized" } }
+  /v1/admin/subscriptions/{id}/resync:
+    post:
+      tags: [admin]
+      summary: Resync a subscription from Stripe
+      security: [{ adminAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses: { "401": { $ref: "#/components/responses/Unauthorized" } }
+  /v1/admin/audit:
+    get:
+      tags: [admin]
+      summary: Read commercial audit events
+      security: [{ adminAuth: [] }]
+      responses: { "401": { $ref: "#/components/responses/Unauthorized" } }
+components:
+  securitySchemes:
+    customerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Supabase-issued customer JWT
+    adminAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Operator JWT from the admin issuer (separate from customer auth)
+  parameters:
+    PathId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string }
+  responses:
+    Unauthorized:
+      description: Authentication failed
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Authenticated but not permitted (or suspended)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, examples: ["CUSTOMER_SUSPENDED"] }
+            message: { type: string }
+            correlation_id: { type: ["string", "null"] }
+            details: { type: object }
+security:
+  - customerAuth: []

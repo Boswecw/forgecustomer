@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.boswell.example/forge/entitlement-v1.schema.json",
+  "title": "ForgeCustomer Signed Entitlement Snapshot",
+  "description": "Ed25519-signed entitlement snapshot issued to product clients. The signature covers the canonical JSON of every field except `signature`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "customer_id",
+    "product",
+    "issued_at",
+    "expires_at",
+    "features",
+    "quotas",
+    "key_id",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "forge.entitlements.v1"
+    },
+    "customer_id": { "type": "string", "description": "ForgeCustomer business customer id" },
+    "installation_id": {
+      "type": ["string", "null"],
+      "description": "Installation the snapshot was issued to, if any"
+    },
+    "product": { "type": "string", "examples": ["authorforge"] },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "features": {
+      "type": "object",
+      "description": "Feature key to typed value",
+      "additionalProperties": {
+        "type": ["boolean", "number", "string"]
+      }
+    },
+    "quotas": {
+      "type": "object",
+      "description": "Quota key to numeric limit/usage",
+      "additionalProperties": { "type": "number" }
+    },
+    "key_id": {
+      "type": "string",
+      "description": "Identifies the verifying key; resolve via GET /v1/entitlements/keys",
+      "examples": ["entitlement-key-1"]
+    },
+    "signature": {
+      "type": "string",
+      "description": "Base64 Ed25519 signature over the snapshot with `signature` cleared"
+    }
+  }
+}

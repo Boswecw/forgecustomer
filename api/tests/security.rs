@@ -330,6 +330,30 @@ async fn entitlement_keys_remain_public() {
 }
 
 #[tokio::test]
+async fn usage_routes_require_customer_auth() {
+    let req = Request::builder()
+        .uri("/v1/usage/current")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(status_of(req).await, StatusCode::UNAUTHORIZED);
+
+    for uri in [
+        "/v1/usage/check",
+        "/v1/usage/reserve",
+        "/v1/usage/commit",
+        "/v1/usage/release",
+    ] {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        assert_eq!(status_of(req).await, StatusCode::UNAUTHORIZED, "{uri}");
+    }
+}
+
+#[tokio::test]
 async fn parameterized_admin_routes_match_and_require_auth() {
     let id = "9f1c2d3e-4b5a-6789-0abc-def012345678";
     for uri in [

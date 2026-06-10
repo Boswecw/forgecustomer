@@ -46,6 +46,10 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 - Admin role boundary: operator tokens without the `admin` role are rejected (403) on
   every mutation; reads pass; reason validation rejects before any database write; usage
   adjustments without an idempotency key are rejected.
+- Usage domain rules: amount bounds, cadence period keys, quota-key candidate order, and
+  threshold-crossing detection (fires exactly on crossing, never re-fires, never for
+  unlimited/zero limits).
+- All five usage routes fail closed without auth.
 - Stripe webhook signature, parsing, missing/bad signature, and malformed signed-envelope
   rejection behavior.
 - Customer token cannot access admin route.
@@ -64,10 +68,11 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 
 These are intentional MVP gaps and should not be hidden by documentation:
 
-- Usage reserve/commit/release/current route wiring.
 - Deletion workflow endpoints and the anonymization outbox emit.
-- End-to-end suites with live or mocked Stripe/Supabase/DataForge flows (including
-  DB-backed proofs for device-limit, revocation, snapshot, lease, and admin paths).
+- The customer subscription summary endpoint (`GET /v1/subscriptions`).
+- End-to-end suites with live or mocked Stripe/Supabase/DataForge flows in CI (including
+  DB-backed proofs for device-limit, revocation, snapshot, lease, admin, and usage
+  paths).
 
 ### Release standard
 

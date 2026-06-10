@@ -165,6 +165,27 @@ The response returns the Stripe-hosted checkout URL and records
 **not** activate entitlements; verified Stripe webhooks remain the only path that changes
 subscription truth.
 
+## Usage: check, reserve, commit, release, current
+
+See `docs/USAGE.md` for the full rules. Summary of the live endpoints:
+
+- `POST /v1/usage/check` — advisory, read-only quota check for one meter.
+- `POST /v1/usage/reserve` — holds units against the quota (requires `Idempotency-Key`;
+  replays return the original reservation). Quota math runs under a per-(customer,
+  meter, period) lock; over-quota requests answer `402 QUOTA_EXCEEDED` with the
+  explainable decision in the details, and every decision lands in `quota_decisions`.
+  Reservations expire after `USAGE_RESERVATION_TTL_SECS` (lazily and via a background
+  sweeper), freeing their hold.
+- `POST /v1/usage/commit` — appends to the append-only `usage_events` ledger (requires
+  `Idempotency-Key`; replays do not double-charge). Either converts a pending
+  reservation (charging the reservation's period; expired/terminal reservations `409`)
+  or directly charges `meter_key`+`amount`, quota-gated at commit time. Threshold
+  crossings queue `quota_threshold_reached` outbox events; denied direct commits queue
+  `usage_commit_failed`.
+- `POST /v1/usage/release` — releases an unused reservation, idempotently.
+- `GET /v1/usage/current` — per-meter current-period totals with limits and remaining
+  quota from the assembled entitlements.
+
 ## Admin API (Forge Command)
 
 The `/v1/admin/*` surface is the integration point for **Forge Command**, the operator

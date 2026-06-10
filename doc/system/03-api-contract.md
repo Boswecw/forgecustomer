@@ -43,10 +43,18 @@ Current route surface:
 - `POST /v1/checkout`
 
 `POST /v1/account/provision` creates or returns the caller's business customer profile
-idempotently and writes the initial status-history receipt for newly-created profiles.
-`GET /v1/account` returns the resolved customer/auth identifiers today. The remaining
-DB-backed customer handlers (usage) currently return `NOT_IMPLEMENTED` after auth and
-active customer checks pass.
+idempotently, writes the initial status-history receipt, and queues the sanitized
+`customer_created` outbox event for newly-created profiles. `GET /v1/account` returns
+the resolved customer/auth identifiers today. The only remaining `NOT_IMPLEMENTED`
+customer handler is the subscription summary (`GET /v1/subscriptions`), which still
+enforces the auth boundary.
+
+The usage surface is implemented: advisory `check`; idempotent `reserve` under a
+per-(customer, meter, period) lock with explainable `quota_decisions` rows and
+reservation expiry (lazy + background sweeper); `commit` converting reservations or
+directly charging with quota gating, never double-charging on replay, and queueing
+threshold/commit-failed outbox events; idempotent `release`; and `current` totals with
+limits and remaining quota.
 
 The entitlement surface is implemented: `GET /v1/entitlements/current` assembles the
 caller's entitlements (included-plan baseline → subscription plan → license grants →

@@ -43,6 +43,10 @@ Implemented today:
   resync, operator license issue/revoke, entitlement overrides, compensating usage
   adjustments, and audit reads — mutations role-gated (`admin`), reason-required, and
   audited with the operator as actor.
+- The usage lifecycle: advisory checks, idempotent lock-serialized reservations with
+  expiry (lazy + background sweeper), reservation/direct commits on the append-only
+  ledger with explainable quota decisions, releases, and per-meter current totals;
+  threshold and commit-failure outbox events.
 - Public product and plan catalog endpoints backed by SQLx repositories.
 - Customer and admin JWT extraction boundaries.
 - Public entitlement key endpoint and Ed25519 signing/key-ring services.
@@ -56,8 +60,8 @@ Implemented today:
 
 Still pending before AuthorForge can rely on the service end to end:
 
-- Usage reserve/commit/release/current endpoint wiring.
 - Deletion workflow endpoints and the anonymization outbox emit.
+- The customer subscription summary endpoint (`GET /v1/subscriptions`).
 
 The router intentionally returns `NOT_IMPLEMENTED` for many protected handlers while
 still enforcing the correct auth boundary. That is a security feature of the current

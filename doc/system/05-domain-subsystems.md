@@ -112,8 +112,22 @@ Usage accounting is ledger-first:
 - `quota_decisions` records explainable allow/deny decisions.
 - Meter units must be explicit.
 
-The pure usage decision logic is implemented. Reserve/commit/release/current endpoints
-remain pending.
+Implemented behavior:
+
+- Limits resolve from the assembled entitlement quotas (cadence-qualified key first);
+  uncataloged quota rows leave a meter uncapped, while the included plan zeroes the paid
+  meters for free customers.
+- Reserve and direct commit share one decision path under a `(customer, meter, period)`
+  totals lock; every decision (allow and deny) is recorded in `quota_decisions`.
+- Reservations dedupe on `(customer, idempotency key)`, commits dedupe the same pair in
+  the ledger; replays return the original row and never double-charge.
+- Stale pending reservations expire lazily inside that lock and via the
+  `workers::usage` background sweeper; committing an expired reservation fails closed
+  and frees its hold.
+- Threshold crossings queue `quota_threshold_reached` once per
+  (customer, meter, period, threshold); denied direct commits queue
+  `usage_commit_failed`.
+- Period totals are derived and were verified live to equal the ledger sum.
 
 ### Privacy and deletion
 
@@ -124,10 +138,12 @@ sanitized before entering the outbox.
 
 ### Admin operations
 
-Admin APIs use a separate operator issuer and audience. A future admin mutation must:
+Admin APIs use a separate operator issuer and audience (Forge Command). Every
+implemented admin mutation:
 
-- Validate operator authorization.
-- Require a reason for material commercial changes.
-- Write commercial audit.
-- Preserve append-only ledgers.
-- Emit a sanitized outbox event when downstream evidence is required.
+- Validates operator authorization (mutations additionally require the `admin` role).
+- Requires a written reason for material commercial changes.
+- Writes operator-actor commercial audit.
+- Preserves append-only ledgers (usage corrections are compensating adjustment events
+  behind a required idempotency key).
+- Emits a sanitized outbox event where the event contract defines one.

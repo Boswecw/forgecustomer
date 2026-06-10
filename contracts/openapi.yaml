@@ -338,23 +338,114 @@ paths:
       responses:
         "200": { description: Key set }
   /v1/usage/check:
-    post: { tags: [usage], summary: Check quota, responses: { "401": { $ref: "#/components/responses/Unauthorized" } } }
+    post:
+      tags: [usage]
+      summary: Advisory quota check (no state change)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [meter_key]
+              properties:
+                meter_key: { type: string, examples: ["cloud_tokens"] }
+                amount:
+                  type: ["number", "null"]
+                  description: Amount about to be consumed; omit to ask "within quota now".
+                product_key: { type: ["string", "null"], default: authorforge }
+      responses:
+        "200": { description: "Decision { allowed, limit, used, reserved, remaining_before, reason }" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Unknown usage meter }
   /v1/usage/reserve:
     post:
       tags: [usage]
-      summary: Reserve usage
+      summary: Hold units against the quota (idempotent; expires if not committed)
+      description: >
+        Quota math runs under a per-(customer, meter, period) lock; stale pending
+        reservations are expired lazily and by a background sweeper. Denials record an
+        explainable quota_decisions row and hold nothing; retries with the same
+        Idempotency-Key replay the original reservation.
       parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
-      responses: { "401": { $ref: "#/components/responses/Unauthorized" }, "402": { description: Quota exceeded } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [meter_key, amount]
+              properties:
+                meter_key: { type: string }
+                amount: { type: number, exclusiveMinimum: 0 }
+                product_key: { type: ["string", "null"], default: authorforge }
+      responses:
+        "200": { description: "Reservation { id, amount, status, period_key, expires_at } + replayed flag" }
+        "400": { description: Missing Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { description: "Quota exceeded (QUOTA_EXCEEDED; details carry limit/used/reserved)" }
+        "404": { description: Unknown usage meter }
+        "422": { description: Validation failed }
   /v1/usage/commit:
     post:
       tags: [usage]
-      summary: Commit reserved/direct usage
+      summary: Append a usage commit to the ledger (reservation or direct; idempotent)
+      description: >
+        Provide reservation_id to convert a pending hold, or meter_key+amount for a
+        quota-gated direct charge. Replays with the same Idempotency-Key return the
+        original event without double-charging. Threshold crossings queue sanitized
+        quota_threshold_reached outbox events once per (customer, meter, period,
+        threshold); denied direct commits queue usage_commit_failed.
       parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
-      responses: { "401": { $ref: "#/components/responses/Unauthorized" } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                reservation_id: { type: ["string", "null"], format: uuid }
+                meter_key: { type: ["string", "null"] }
+                amount: { type: ["number", "null"], exclusiveMinimum: 0 }
+                product_key: { type: ["string", "null"], default: authorforge }
+      responses:
+        "200": { description: "Ledger event + used_after + thresholds_crossed (or replayed: true)" }
+        "400": { description: Missing Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { description: "Direct commit exceeds quota (QUOTA_EXCEEDED)" }
+        "404": { description: Reservation or meter not found }
+        "409": { description: "Reservation no longer committable (committed/released/expired)" }
+        "422": { description: "Provide reservation_id, or meter_key with amount" }
   /v1/usage/release:
-    post: { tags: [usage], summary: Release a reservation, responses: { "401": { $ref: "#/components/responses/Unauthorized" } } }
+    post:
+      tags: [usage]
+      summary: Release an unused reservation (idempotent)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reservation_id]
+              properties:
+                reservation_id: { type: string, format: uuid }
+      responses:
+        "200": { description: "Release outcome { status, released_amount?, changed }" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Reservation not found }
   /v1/usage/current:
-    get: { tags: [usage], summary: Current usage totals, responses: { "401": { $ref: "#/components/responses/Unauthorized" } } }
+    get:
+      tags: [usage]
+      summary: Current-period totals, limits, and remaining quota per meter
+      parameters:
+        - { name: product_key, in: query, required: false, schema: { type: string, default: authorforge } }
+      responses:
+        "200": { description: "Per-meter { period_key, used, reserved, limit, remaining }" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /v1/checkout:
     post:
       tags: [checkout]

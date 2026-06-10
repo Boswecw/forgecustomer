@@ -36,6 +36,10 @@ pub struct Config {
 
     pub snapshot_ttl: Duration,
     pub offline_grace: Duration,
+    /// How long a usage reservation holds quota before it auto-expires.
+    pub usage_reservation_ttl: Duration,
+    /// Usage thresholds (percent of limit) that emit `quota_threshold_reached`.
+    pub usage_threshold_percents: Vec<u8>,
 
     pub request_timeout: Duration,
     pub max_body_bytes: usize,
@@ -65,6 +69,29 @@ fn parse_u64(key: &'static str, default: u64) -> Result<u64, ConfigError> {
             .map_err(|e| ConfigError::Invalid(key, e.to_string())),
         Err(_) => Ok(default),
     }
+}
+
+/// Parse a comma-separated list of percentages (1–100), e.g. "80,100".
+fn parse_percent_list(key: &'static str, default: &[u8]) -> Result<Vec<u8>, ConfigError> {
+    let raw = match std::env::var(key) {
+        Ok(value) => value,
+        Err(_) => return Ok(default.to_vec()),
+    };
+    let mut out = Vec::new();
+    for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let pct = part
+            .parse::<u8>()
+            .ok()
+            .filter(|pct| (1..=100).contains(pct))
+            .ok_or(ConfigError::Invalid(
+                key,
+                "must be comma-separated percentages between 1 and 100".to_string(),
+            ))?;
+        out.push(pct);
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
 }
 
 impl Config {
@@ -101,6 +128,11 @@ impl Config {
             dataforge_service_token: optional("DATAFORGE_SERVICE_TOKEN", ""),
             snapshot_ttl: Duration::from_secs(snapshot_ttl_hours * 3600),
             offline_grace: Duration::from_secs(offline_grace_days * 86400),
+            usage_reservation_ttl: Duration::from_secs(parse_u64(
+                "USAGE_RESERVATION_TTL_SECS",
+                900,
+            )?),
+            usage_threshold_percents: parse_percent_list("USAGE_THRESHOLD_PERCENTS", &[80, 100])?,
             request_timeout: Duration::from_secs(parse_u64("REQUEST_TIMEOUT_SECS", 30)?),
             max_body_bytes: parse_u64("MAX_BODY_BYTES", 1024 * 1024)? as usize,
         })

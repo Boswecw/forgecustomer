@@ -2,9 +2,9 @@
 //! admin routes resolve an [`AdminContext`] validated against the separate operator issuer
 //! (Forge Command), with mutations additionally gated on the `admin` operator role.
 //!
-//! Handlers whose full behavior depends on remaining MVP wiring (usage flows) return
-//! `NOT_IMPLEMENTED` but still enforce the correct auth boundary, so the security
-//! contract is testable today.
+//! The only handler still returning `NOT_IMPLEMENTED` is the subscription summary
+//! (`GET /v1/subscriptions`); it still enforces the correct auth boundary, so the
+//! security contract is testable today.
 
 pub mod catalog;
 pub mod entitlements;
@@ -30,6 +30,9 @@ use crate::domain::customer::{
 };
 use crate::domain::entitlement::clean_entitlement_key;
 use crate::domain::installation::{clean_app_version, validate_registration, RegistrationInput};
+use crate::domain::usage::{
+    clean_usage_amount, decide, period_key_for, quota_key_candidates, Decision,
+};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::integrations::stripe::{
     create_checkout_session, fetch_subscription, parse_event, verify_signature, CheckoutError,
@@ -38,6 +41,7 @@ use crate::integrations::stripe::{
 use crate::middleware as mw;
 use crate::repositories::commerce::{StripeWebhookApplyError, StripeWebhookRecordOutcome};
 use crate::repositories::licensing::{self, ActivationError, RegistrationError};
+use crate::repositories::usage as usage_repo;
 use crate::repositories::{admin, commerce, customers};
 use crate::state::AppState;
 
@@ -511,29 +515,354 @@ async fn devices_get(
     Ok(Json(json!({ "devices": devices })))
 }
 
-async fn usage_check(ctx: CustomerContext) -> AppResult<Json<Value>> {
-    ctx.require_active()?;
-    Err(pending("Usage check"))
+// --- Usage endpoints (reserve → commit → release; quota-gated, idempotent) --
+
+fn usage_error(error: usage_repo::UsageError) -> AppError {
+    match error {
+        usage_repo::UsageError::MeterNotFound => AppError::not_found("Unknown usage meter."),
+        usage_repo::UsageError::ReservationNotFound => {
+            AppError::not_found("Reservation not found.")
+        }
+        usage_repo::UsageError::ReservationNotCommittable(status) => AppError::new(
+            ErrorCode::Conflict,
+            "Reservation can no longer be committed.",
+        )
+        .with_details(json!({ "reservation_status": status })),
+        usage_repo::UsageError::Db(error) => error.into(),
+    }
 }
 
-async fn usage_reserve(ctx: CustomerContext) -> AppResult<Json<Value>> {
-    ctx.require_active()?;
-    Err(pending("Usage reservation"))
+fn quota_exceeded(denied: usage_repo::DeniedDecision) -> AppError {
+    AppError::new(
+        ErrorCode::QuotaExceeded,
+        "The requested amount exceeds the remaining quota.",
+    )
+    .with_details(json!({
+        "reason": denied.reason,
+        "limit": denied.limit,
+        "used": denied.used,
+        "reserved": denied.reserved,
+        "remaining_before": denied.remaining_before,
+    }))
 }
 
-async fn usage_commit(ctx: CustomerContext) -> AppResult<Json<Value>> {
-    ctx.require_active()?;
-    Err(pending("Usage commit"))
+/// Resolve the quota limit for a meter from the assembled entitlement quotas: the
+/// cadence-qualified key (`cloud_tokens.monthly`) wins over the bare meter key.
+/// `None` means the meter is uncapped for this customer.
+async fn meter_quota_limit(
+    state: &AppState,
+    customer_id: Uuid,
+    product_key: &str,
+    meter: &usage_repo::MeterRow,
+) -> AppResult<Option<f64>> {
+    let loaded = crate::repositories::entitlements::load_entitlement_inputs(
+        &state.pool,
+        customer_id,
+        product_key,
+    )
+    .await?
+    .ok_or_else(|| AppError::not_found("Unknown or inactive product."))?;
+    let result = crate::domain::entitlement::evaluate(&loaded.inputs);
+    let [primary, fallback] = quota_key_candidates(&meter.key, &meter.reset_cadence);
+    Ok(result
+        .quotas
+        .get(&primary)
+        .or_else(|| result.quotas.get(&fallback))
+        .copied())
 }
 
-async fn usage_release(ctx: CustomerContext) -> AppResult<Json<Value>> {
-    ctx.require_active()?;
-    Err(pending("Usage release"))
+fn clean_meter_key(value: &str) -> AppResult<String> {
+    clean_entitlement_key(value).map_err(|message| {
+        AppError::validation(message).with_details(json!({ "field": "meter_key" }))
+    })
 }
 
-async fn usage_current(ctx: CustomerContext) -> AppResult<Json<Value>> {
-    ctx.require_active()?;
-    Err(pending("Usage summary"))
+fn clean_amount(value: f64) -> AppResult<f64> {
+    clean_usage_amount(value)
+        .map_err(|message| AppError::validation(message).with_details(json!({ "field": "amount" })))
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageCheckRequest {
+    meter_key: String,
+    amount: Option<f64>,
+    product_key: Option<String>,
+}
+
+async fn usage_check(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+    Json(request): Json<UsageCheckRequest>,
+) -> AppResult<Json<Value>> {
+    let customer_id = ctx.require_active()?;
+    let product_key = entitlements::clean_product_key(request.product_key.as_deref())?;
+    let meter_key = clean_meter_key(&request.meter_key)?;
+    let amount = match request.amount {
+        Some(amount) => clean_amount(amount)?,
+        None => 0.0,
+    };
+
+    let meter = usage_repo::find_meter(&state.pool, &meter_key)
+        .await?
+        .ok_or_else(|| AppError::not_found("Unknown usage meter."))?;
+    let limit = meter_quota_limit(&state, customer_id, &product_key, &meter).await?;
+    let period_key = period_key_for(&meter.reset_cadence, chrono::Utc::now());
+    let (used, reserved) =
+        usage_repo::read_totals(&state.pool, customer_id, &meter_key, &period_key).await?;
+
+    let decision = decide(amount, used, reserved, limit);
+    Ok(Json(json!({
+        "meter_key": meter_key,
+        "period_key": period_key,
+        "allowed": decision.decision == Decision::Allow,
+        "requested": amount,
+        "limit": limit,
+        "used": used,
+        "reserved": reserved,
+        "remaining_before": decision.remaining_before,
+        "reason": decision.reason,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageReserveRequest {
+    meter_key: String,
+    amount: f64,
+    product_key: Option<String>,
+}
+
+async fn usage_reserve(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    Json(request): Json<UsageReserveRequest>,
+) -> AppResult<Json<Value>> {
+    let customer_id = ctx.require_active()?;
+    let key = idempotency_key(&headers).ok_or_else(|| {
+        AppError::bad_request("Usage reservations require an Idempotency-Key header.")
+    })?;
+    let product_key = entitlements::clean_product_key(request.product_key.as_deref())?;
+    let meter_key = clean_meter_key(&request.meter_key)?;
+    let amount = clean_amount(request.amount)?;
+
+    let meter = usage_repo::find_meter(&state.pool, &meter_key)
+        .await?
+        .ok_or_else(|| AppError::not_found("Unknown usage meter."))?;
+    let limit = meter_quota_limit(&state, customer_id, &product_key, &meter).await?;
+    let period_key = period_key_for(&meter.reset_cadence, chrono::Utc::now());
+    let ttl = chrono::Duration::from_std(state.config.usage_reservation_ttl)
+        .map_err(|_| AppError::internal("Invalid reservation TTL configuration."))?;
+
+    let outcome = usage_repo::reserve(
+        &state.pool,
+        usage_repo::ReserveInput {
+            customer_id,
+            meter_key: &meter_key,
+            amount,
+            limit,
+            period_key: &period_key,
+            ttl,
+            idempotency_key: key,
+            correlation_id: correlation_id(&correlation),
+        },
+    )
+    .await
+    .map_err(usage_error)?;
+
+    match outcome {
+        usage_repo::ReserveOutcome::Reserved(reservation) => Ok(Json(json!({
+            "reservation": reservation,
+            "replayed": false,
+        }))),
+        usage_repo::ReserveOutcome::Replayed(reservation) => Ok(Json(json!({
+            "reservation": reservation,
+            "replayed": true,
+        }))),
+        usage_repo::ReserveOutcome::Denied(denied) => Err(quota_exceeded(denied)),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageCommitRequest {
+    reservation_id: Option<String>,
+    meter_key: Option<String>,
+    amount: Option<f64>,
+    product_key: Option<String>,
+}
+
+async fn usage_commit(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    Json(request): Json<UsageCommitRequest>,
+) -> AppResult<Json<Value>> {
+    let customer_id = ctx.require_active()?;
+    let key = idempotency_key(&headers)
+        .ok_or_else(|| AppError::bad_request("Usage commits require an Idempotency-Key header."))?;
+    let product_key = entitlements::clean_product_key(request.product_key.as_deref())?;
+
+    // Resolve the mode and the meter/limit/period it charges against. Reservation
+    // commits charge the reservation's own period; direct commits charge now.
+    let (mode, meter, period_key) = match (&request.reservation_id, &request.meter_key) {
+        (Some(raw), None) => {
+            let reservation_id = Uuid::parse_str(raw.trim()).map_err(|_| {
+                AppError::validation("must be a UUID")
+                    .with_details(json!({ "field": "reservation_id" }))
+            })?;
+            let reservation =
+                usage_repo::find_reservation(&state.pool, customer_id, reservation_id)
+                    .await?
+                    .ok_or_else(|| AppError::not_found("Reservation not found."))?;
+            let meter = usage_repo::find_meter(&state.pool, &reservation.meter_key)
+                .await?
+                .ok_or_else(|| AppError::not_found("Unknown usage meter."))?;
+            (
+                usage_repo::CommitMode::Reservation(reservation_id),
+                meter,
+                reservation.period_key,
+            )
+        }
+        (None, Some(raw_meter)) => {
+            let meter_key = clean_meter_key(raw_meter)?;
+            let amount = clean_amount(request.amount.ok_or_else(|| {
+                AppError::validation("is required for direct commits")
+                    .with_details(json!({ "field": "amount" }))
+            })?)?;
+            let meter = usage_repo::find_meter(&state.pool, &meter_key)
+                .await?
+                .ok_or_else(|| AppError::not_found("Unknown usage meter."))?;
+            let period_key = period_key_for(&meter.reset_cadence, chrono::Utc::now());
+            (
+                usage_repo::CommitMode::Direct { meter_key, amount },
+                meter,
+                period_key,
+            )
+        }
+        _ => {
+            return Err(
+                AppError::validation("Provide reservation_id, or meter_key with amount.")
+                    .with_details(json!({ "field": "reservation_id" })),
+            );
+        }
+    };
+
+    let limit = meter_quota_limit(&state, customer_id, &product_key, &meter).await?;
+    let outcome = usage_repo::commit(
+        &state.pool,
+        usage_repo::CommitInput {
+            customer_id,
+            mode,
+            limit,
+            period_key: &period_key,
+            threshold_percents: &state.config.usage_threshold_percents,
+            idempotency_key: key,
+            correlation_id: correlation_id(&correlation),
+        },
+    )
+    .await
+    .map_err(usage_error)?;
+
+    match outcome {
+        usage_repo::CommitOutcome::Committed {
+            event,
+            used_after,
+            thresholds_crossed,
+        } => Ok(Json(json!({
+            "event": event,
+            "used_after": used_after,
+            "thresholds_crossed": thresholds_crossed,
+            "replayed": false,
+        }))),
+        usage_repo::CommitOutcome::Replayed(event) => Ok(Json(json!({
+            "event": event,
+            "replayed": true,
+        }))),
+        usage_repo::CommitOutcome::Denied(denied) => Err(quota_exceeded(denied)),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageReleaseRequest {
+    reservation_id: String,
+}
+
+async fn usage_release(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+    Json(request): Json<UsageReleaseRequest>,
+) -> AppResult<Json<Value>> {
+    let customer_id = ctx.require_active()?;
+    let reservation_id = Uuid::parse_str(request.reservation_id.trim()).map_err(|_| {
+        AppError::validation("must be a UUID").with_details(json!({ "field": "reservation_id" }))
+    })?;
+
+    let outcome = usage_repo::release(&state.pool, customer_id, reservation_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Reservation not found."))?;
+    match outcome {
+        usage_repo::ReleaseOutcome::Released { amount } => Ok(Json(json!({
+            "reservation_id": reservation_id,
+            "status": "released",
+            "released_amount": amount,
+            "changed": true,
+        }))),
+        usage_repo::ReleaseOutcome::AlreadyTerminal { status } => Ok(Json(json!({
+            "reservation_id": reservation_id,
+            "status": status,
+            "changed": false,
+        }))),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct UsageCurrentQuery {
+    product_key: Option<String>,
+}
+
+async fn usage_current(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<UsageCurrentQuery>,
+) -> AppResult<Json<Value>> {
+    let customer_id = ctx.require_active()?;
+    let product_key = entitlements::clean_product_key(query.product_key.as_deref())?;
+
+    let loaded = crate::repositories::entitlements::load_entitlement_inputs(
+        &state.pool,
+        customer_id,
+        &product_key,
+    )
+    .await?
+    .ok_or_else(|| AppError::not_found("Unknown or inactive product."))?;
+    let result = crate::domain::entitlement::evaluate(&loaded.inputs);
+
+    let rows = usage_repo::current_usage(&state.pool, customer_id).await?;
+    let meters: Vec<Value> = rows
+        .into_iter()
+        .map(|row| {
+            let [primary, fallback] = quota_key_candidates(&row.meter_key, &row.reset_cadence);
+            let limit = result
+                .quotas
+                .get(&primary)
+                .or_else(|| result.quotas.get(&fallback))
+                .copied();
+            let remaining = limit.map(|limit| limit - row.used - row.reserved);
+            json!({
+                "meter_key": row.meter_key,
+                "unit": row.unit,
+                "reset_cadence": row.reset_cadence,
+                "period_key": row.period_key,
+                "used": row.used,
+                "reserved": row.reserved,
+                "limit": limit,
+                "remaining": remaining,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({ "product_key": product_key, "usage": meters })))
 }
 
 async fn checkout_create(

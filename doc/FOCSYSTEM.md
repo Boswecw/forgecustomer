@@ -86,6 +86,10 @@ Implemented today:
   resync, operator license issue/revoke, entitlement overrides, compensating usage
   adjustments, and audit reads — mutations role-gated (`admin`), reason-required, and
   audited with the operator as actor.
+- The usage lifecycle: advisory checks, idempotent lock-serialized reservations with
+  expiry (lazy + background sweeper), reservation/direct commits on the append-only
+  ledger with explainable quota decisions, releases, and per-meter current totals;
+  threshold and commit-failure outbox events.
 - Public product and plan catalog endpoints backed by SQLx repositories.
 - Customer and admin JWT extraction boundaries.
 - Public entitlement key endpoint and Ed25519 signing/key-ring services.
@@ -99,8 +103,8 @@ Implemented today:
 
 Still pending before AuthorForge can rely on the service end to end:
 
-- Usage reserve/commit/release/current endpoint wiring.
 - Deletion workflow endpoints and the anonymization outbox emit.
+- The customer subscription summary endpoint (`GET /v1/subscriptions`).
 
 The router intentionally returns `NOT_IMPLEMENTED` for many protected handlers while
 still enforcing the correct auth boundary. That is a security feature of the current
@@ -318,10 +322,18 @@ Current route surface:
 - `POST /v1/checkout`
 
 `POST /v1/account/provision` creates or returns the caller's business customer profile
-idempotently and writes the initial status-history receipt for newly-created profiles.
-`GET /v1/account` returns the resolved customer/auth identifiers today. The remaining
-DB-backed customer handlers (usage) currently return `NOT_IMPLEMENTED` after auth and
-active customer checks pass.
+idempotently, writes the initial status-history receipt, and queues the sanitized
+`customer_created` outbox event for newly-created profiles. `GET /v1/account` returns
+the resolved customer/auth identifiers today. The only remaining `NOT_IMPLEMENTED`
+customer handler is the subscription summary (`GET /v1/subscriptions`), which still
+enforces the auth boundary.
+
+The usage surface is implemented: advisory `check`; idempotent `reserve` under a
+per-(customer, meter, period) lock with explainable `quota_decisions` rows and
+reservation expiry (lazy + background sweeper); `commit` converting reservations or
+directly charging with quota gating, never double-charging on replay, and queueing
+threshold/commit-failed outbox events; idempotent `release`; and `current` totals with
+limits and remaining quota.
 
 The entitlement surface is implemented: `GET /v1/entitlements/current` assembles the
 caller's entitlements (included-plan baseline → subscription plan → license grants →
@@ -593,8 +605,22 @@ Usage accounting is ledger-first:
 - `quota_decisions` records explainable allow/deny decisions.
 - Meter units must be explicit.
 
-The pure usage decision logic is implemented. Reserve/commit/release/current endpoints
-remain pending.
+Implemented behavior:
+
+- Limits resolve from the assembled entitlement quotas (cadence-qualified key first);
+  uncataloged quota rows leave a meter uncapped, while the included plan zeroes the paid
+  meters for free customers.
+- Reserve and direct commit share one decision path under a `(customer, meter, period)`
+  totals lock; every decision (allow and deny) is recorded in `quota_decisions`.
+- Reservations dedupe on `(customer, idempotency key)`, commits dedupe the same pair in
+  the ledger; replays return the original row and never double-charge.
+- Stale pending reservations expire lazily inside that lock and via the
+  `workers::usage` background sweeper; committing an expired reservation fails closed
+  and frees its hold.
+- Threshold crossings queue `quota_threshold_reached` once per
+  (customer, meter, period, threshold); denied direct commits queue
+  `usage_commit_failed`.
+- Period totals are derived and were verified live to equal the ledger sum.
 
 ### Privacy and deletion
 
@@ -605,13 +631,15 @@ sanitized before entering the outbox.
 
 ### Admin operations
 
-Admin APIs use a separate operator issuer and audience. A future admin mutation must:
+Admin APIs use a separate operator issuer and audience (Forge Command). Every
+implemented admin mutation:
 
-- Validate operator authorization.
-- Require a reason for material commercial changes.
-- Write commercial audit.
-- Preserve append-only ledgers.
-- Emit a sanitized outbox event when downstream evidence is required.
+- Validates operator authorization (mutations additionally require the `admin` role).
+- Requires a written reason for material commercial changes.
+- Writes operator-actor commercial audit.
+- Preserves append-only ledgers (usage corrections are compensating adjustment events
+  behind a required idempotency key).
+- Emits a sanitized outbox event where the event contract defines one.
 
 ---
 
@@ -662,10 +690,13 @@ Outbox behavior:
 - Retry uses deterministic backoff and eventually dead-letters exhausted events.
 - Delivery keys must make repeated publishes idempotent downstream.
 
-Live emit sites: `subscription_changed` (webhook processing and admin resync, when the
-projection changed), `installation_registered` (first registration), `license_activated`
-(successful activation), `license_revoked` (admin revocation), and `customer_suspended` /
-`customer_restored` (admin status changes).
+Live emit sites: `customer_created` (provisioning), `subscription_changed` (webhook
+processing and admin resync, when the projection changed), `installation_registered`
+(first registration), `license_activated` (successful activation), `license_revoked`
+(admin revocation), `customer_suspended` / `customer_restored` (admin status changes),
+`quota_threshold_reached` (usage commits crossing configured thresholds, once per
+customer/meter/period/threshold), and `usage_commit_failed` (denied direct commits).
+The only contract event not yet emitted is `customer_anonymized` (deletion workflow).
 
 ### Event payload hygiene
 
@@ -903,6 +934,10 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 - Admin role boundary: operator tokens without the `admin` role are rejected (403) on
   every mutation; reads pass; reason validation rejects before any database write; usage
   adjustments without an idempotency key are rejected.
+- Usage domain rules: amount bounds, cadence period keys, quota-key candidate order, and
+  threshold-crossing detection (fires exactly on crossing, never re-fires, never for
+  unlimited/zero limits).
+- All five usage routes fail closed without auth.
 - Stripe webhook signature, parsing, missing/bad signature, and malformed signed-envelope
   rejection behavior.
 - Customer token cannot access admin route.
@@ -921,10 +956,11 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 
 These are intentional MVP gaps and should not be hidden by documentation:
 
-- Usage reserve/commit/release/current route wiring.
 - Deletion workflow endpoints and the anonymization outbox emit.
-- End-to-end suites with live or mocked Stripe/Supabase/DataForge flows (including
-  DB-backed proofs for device-limit, revocation, snapshot, lease, and admin paths).
+- The customer subscription summary endpoint (`GET /v1/subscriptions`).
+- End-to-end suites with live or mocked Stripe/Supabase/DataForge flows in CI (including
+  DB-backed proofs for device-limit, revocation, snapshot, lease, admin, and usage
+  paths).
 
 ### Release standard
 

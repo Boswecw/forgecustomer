@@ -94,6 +94,17 @@ pub async fn provision_for_auth_user(
             .bind(auth_user_id.to_string())
             .execute(&mut *tx)
             .await?;
+            crate::repositories::licensing::write_outbox(
+                &mut tx,
+                "customer_created",
+                format!("customer_created:{}", profile.id),
+                serde_json::json!({
+                    "customer_id": profile.id,
+                    "customer_type": profile.customer_type,
+                    "occurred_at": profile.created_at,
+                }),
+            )
+            .await?;
             (profile, true)
         }
         None => {

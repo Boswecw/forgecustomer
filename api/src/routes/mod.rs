@@ -1,9 +1,9 @@
 //! HTTP routing. Public routes need no auth; customer routes resolve a [`CustomerContext`];
 //! admin routes resolve an [`AdminContext`] validated against the separate operator issuer.
 //!
-//! Handlers whose full behavior depends on remaining MVP wiring (DB-backed commerce,
-//! licensing and usage flows) return `NOT_IMPLEMENTED` but still enforce the correct auth
-//! boundary, so the security contract is testable today.
+//! Handlers whose full behavior depends on remaining MVP wiring (licensing, entitlement
+//! snapshot assembly, usage, and admin flows) return `NOT_IMPLEMENTED` but still enforce
+//! the correct auth boundary, so the security contract is testable today.
 
 pub mod catalog;
 pub mod entitlements;
@@ -19,13 +19,17 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::auth::{AdminContext, AuthUserContext, CustomerContext};
+use crate::domain::checkout::{validate_checkout_input, CheckoutInput};
 use crate::domain::customer::{
     normalize_email_claim, validate_provision_profile, ProvisionProfileInput,
 };
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::integrations::stripe::{parse_event, verify_signature, WebhookError};
+use crate::integrations::stripe::{
+    create_checkout_session, parse_event, verify_signature, CheckoutError, CheckoutSessionRequest,
+    WebhookError,
+};
 use crate::middleware as mw;
-use crate::repositories::commerce::StripeWebhookRecordOutcome;
+use crate::repositories::commerce::{StripeWebhookApplyError, StripeWebhookRecordOutcome};
 use crate::repositories::{commerce, customers};
 use crate::state::AppState;
 
@@ -132,6 +136,22 @@ struct StripeWebhookResponse {
     status: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CheckoutCreateRequest {
+    product_key: Option<String>,
+    plan_key: String,
+    success_url: String,
+    cancel_url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CheckoutCreateResponse {
+    checkout_session_id: Uuid,
+    stripe_checkout_session_id: String,
+    checkout_url: String,
+    status: String,
+}
+
 fn stripe_webhook_error(error: WebhookError) -> AppError {
     match error {
         WebhookError::NotConfigured => AppError::new(
@@ -141,6 +161,38 @@ fn stripe_webhook_error(error: WebhookError) -> AppError {
         _ => AppError::bad_request("Invalid Stripe webhook signature.")
             .with_details(json!({ "reason": error.to_string() })),
     }
+}
+
+fn stripe_checkout_error(error: CheckoutError) -> AppError {
+    match error {
+        CheckoutError::NotConfigured => {
+            AppError::new(ErrorCode::Internal, "Stripe Checkout is not configured.")
+        }
+        CheckoutError::ApiStatus(_) | CheckoutError::Transport(_) => AppError::new(
+            ErrorCode::ServiceUnavailable,
+            "Stripe Checkout is currently unavailable.",
+        )
+        .with_details(json!({ "reason": error.to_string() })),
+        CheckoutError::MissingSessionId | CheckoutError::MissingCheckoutUrl => {
+            AppError::internal("Stripe Checkout returned an incomplete response.")
+        }
+    }
+}
+
+fn stripe_webhook_apply_error(error: StripeWebhookApplyError) -> AppError {
+    tracing::error!(error = %error, "failed to apply Stripe webhook event");
+    AppError::new(
+        ErrorCode::ServiceUnavailable,
+        "Stripe webhook event could not be applied.",
+    )
+}
+
+fn idempotency_key(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 // --- Customer endpoints (auth enforced via CustomerContext) ----------------
@@ -259,9 +311,62 @@ async fn usage_current(ctx: CustomerContext) -> AppResult<Json<Value>> {
     Err(pending("Usage summary"))
 }
 
-async fn checkout_create(ctx: CustomerContext) -> AppResult<Json<Value>> {
-    ctx.require_active()?;
-    Err(pending("Checkout session creation"))
+async fn checkout_create(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CheckoutCreateRequest>,
+) -> AppResult<Json<CheckoutCreateResponse>> {
+    let customer_id = ctx.require_active()?;
+    let validated = validate_checkout_input(CheckoutInput {
+        product_key: request.product_key.as_deref(),
+        plan_key: &request.plan_key,
+        success_url: &request.success_url,
+        cancel_url: &request.cancel_url,
+    })
+    .map_err(|err| AppError::validation(err.message).with_details(json!({ "field": err.field })))?;
+
+    let plan = commerce::find_active_checkout_plan(
+        &state.pool,
+        &validated.product_key,
+        &validated.plan_key,
+    )
+    .await?
+    .ok_or_else(|| AppError::not_found("No active checkout plan matched the request."))?;
+    let stripe_price_id = plan.stripe_price_id.as_deref().ok_or_else(|| {
+        AppError::validation("Selected plan is not available for Stripe Checkout.")
+            .with_details(json!({ "field": "plan_key" }))
+    })?;
+
+    let stripe_session = create_checkout_session(
+        &state.http,
+        &state.config.stripe_secret_key,
+        &CheckoutSessionRequest {
+            price_id: stripe_price_id.to_string(),
+            customer_id: customer_id.to_string(),
+            plan_version_id: plan.plan_version_id.to_string(),
+            success_url: validated.success_url,
+            cancel_url: validated.cancel_url,
+        },
+        idempotency_key(&headers),
+    )
+    .await
+    .map_err(stripe_checkout_error)?;
+
+    let checkout = commerce::record_checkout_session(
+        &state.pool,
+        customer_id,
+        plan.plan_version_id,
+        &stripe_session.id,
+    )
+    .await?;
+
+    Ok(Json(CheckoutCreateResponse {
+        checkout_session_id: checkout.id,
+        stripe_checkout_session_id: checkout.stripe_checkout_session_id,
+        checkout_url: stripe_session.url,
+        status: checkout.status,
+    }))
 }
 
 // --- Stripe webhook (no JWT; signature verified in the handler) ------------
@@ -289,7 +394,9 @@ async fn stripe_webhook(
         AppError::bad_request("Malformed Stripe event payload.")
             .with_details(json!({ "reason": error.to_string() }))
     })?;
-    let record = commerce::record_stripe_webhook_event(&state.pool, &event).await?;
+    let record = commerce::process_stripe_webhook_event(&state.pool, &event)
+        .await
+        .map_err(stripe_webhook_apply_error)?;
     let duplicate = matches!(record.outcome, StripeWebhookRecordOutcome::Duplicate);
 
     Ok(Json(StripeWebhookResponse {

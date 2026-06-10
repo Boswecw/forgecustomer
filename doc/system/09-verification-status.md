@@ -30,6 +30,8 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 - JWT validator accepts valid tokens and rejects expired, wrong-audience, wrong-issuer,
   bad-signature, and unconfigured-secret cases.
 - Bearer header parsing.
+- Checkout request validation and Stripe Checkout Session form construction.
+- Stripe checkout/subscription/invoice event extraction for webhook processing.
 - Account provisioning input validation and customer-auth boundary.
 - Stripe webhook signature, parsing, missing/bad signature, and malformed signed-envelope
   rejection behavior.
@@ -47,13 +49,12 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 
 These are intentional MVP gaps and should not be hidden by documentation:
 
-- Checkout creation and received Stripe webhook state application.
 - Installation/device activation flow.
 - Entitlement snapshot assembly and offline lease issuance.
 - Usage reserve/commit/release/current route wiring.
 - Admin handler implementations.
 - Deletion workflow endpoints.
-- Outbox emit sites from the still-pending mutations.
+- Remaining non-Stripe outbox emit sites from the still-pending mutations.
 - End-to-end suites with live or mocked Stripe/Supabase/DataForge flows.
 
 ### Release standard

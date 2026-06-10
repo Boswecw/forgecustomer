@@ -83,14 +83,35 @@ Clients may submit only profile decoration:
 Customer type, status, commercial records, licenses, entitlements, and usage state are
 server-owned and cannot be set by this endpoint.
 
-## Stripe webhook receipt
+## Stripe webhook processing
 
 `POST /v1/webhooks/stripe` verifies `Stripe-Signature` with `STRIPE_WEBHOOK_SECRET`
 before parsing or writing any event. Verified events are parsed into a minimal
 non-PII summary and stored once in `stripe_webhook_events` by Stripe event id. Duplicate
 deliveries return `200` with `duplicate: true`.
 
-Supported commerce events are stored with `status = "received"` for follow-up state
-application. Unsupported events are acknowledged and stored as `ignored`. Subscription
-mutation, audit writes, and DataForge outbox emission from the received events remain the
-next Phase 5 implementation slice.
+Unsupported events are acknowledged and stored as `ignored`. Supported checkout,
+subscription, and invoice events apply in one transaction: subscription projection is
+normalized, invoice references are recorded, commercial audit is written, a sanitized
+`subscription_changed` outbox event is queued when commercial status changes, and the
+webhook receipt is marked `processed`.
+
+## Checkout creation
+
+`POST /v1/checkout` creates a Stripe Checkout Session for an active paid plan. The caller
+must be an active ForgeCustomer customer. Clients submit catalog keys and redirect URLs;
+the server resolves the active plan version and Stripe price id.
+
+```json
+{
+  "product_key": "authorforge",
+  "plan_key": "authorforge_pro",
+  "success_url": "https://example.com/checkout/success",
+  "cancel_url": "https://example.com/checkout/cancel"
+}
+```
+
+The response returns the Stripe-hosted checkout URL and records
+`stripe_checkout_session_id` in `checkout_sessions` with status `created`. This does
+**not** activate entitlements; verified Stripe webhooks remain the only path that changes
+subscription truth.

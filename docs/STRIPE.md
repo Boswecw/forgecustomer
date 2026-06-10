@@ -3,9 +3,10 @@
 Stripe owns payments; ForgeCustomer stores a **normalized** projection of subscription
 state. Only verified webhook processing changes subscription truth.
 
-Current implementation status: signature verification, event parsing, idempotent receipt,
-duplicate detection, and unsupported-event ignoring are live. Checkout creation and
-subscription state application from received events are the remaining Phase 5 work.
+Current implementation status: Checkout Session creation, signature verification, event
+parsing, idempotent receipt, duplicate detection, unsupported-event ignoring, subscription
+projection, invoice reference recording, commercial audit writes, and sanitized
+`subscription_changed` outbox emission are live.
 
 ## Tables (migration `0003_commerce.sql`)
 
@@ -37,7 +38,9 @@ Client → POST /v1/checkout
   → returns redirect URL
 ```
 
-The browser redirect **does not** activate entitlements.
+The browser redirect **does not** activate entitlements. Checkout requests resolve the
+active `plan_versions.stripe_price_id` server-side; customers cannot submit arbitrary
+Stripe price ids.
 
 ## Webhook flow
 
@@ -47,11 +50,12 @@ Stripe → POST /v1/webhooks/stripe
   → store event id in stripe_webhook_events (dedupe)
   → if duplicate: ack 200, do nothing
   → if unsupported: mark ignored, ack 200
-  → NEXT SLICE: BEGIN tx
-      → normalize subscription state
-      → recompute entitlements
+  → BEGIN tx
+      → normalize subscription state or invoice payment state
+      → update checkout/session/invoice references as applicable
       → write commercial_audit_event
-      → write outbox_event
+      → write sanitized subscription_changed outbox_event when status changes
+      → mark webhook processed
     COMMIT
   → ack 200
 ```
@@ -63,6 +67,7 @@ Required events: `checkout.session.completed`, `customer.subscription.created`,
 ## Mandatory rules
 
 - Browser redirect does not activate entitlements.
+- Customers cannot provide Stripe price ids directly; paid plan selection is catalog-backed.
 - Only verified webhook processing changes subscription truth.
 - Duplicate webhooks are safe (dedupe by Stripe event id).
 - Unsupported event types are acknowledged and ignored explicitly.

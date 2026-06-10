@@ -66,8 +66,10 @@ Implemented today:
   headers.
 - API-owned account provisioning that maps a Supabase auth subject to one ForgeCustomer
   business customer profile idempotently.
-- Stripe webhook signature verification, minimal non-PII event parsing, and idempotent
-  webhook receipt/dedupe.
+- Stripe Checkout Session creation for active paid catalog plans.
+- Stripe webhook signature verification, minimal non-PII event parsing, idempotent
+  processing, subscription projection, invoice reference recording, commercial audit, and
+  sanitized `subscription_changed` outbox emission.
 - Public product and plan catalog endpoints backed by SQLx repositories.
 - Customer and admin JWT extraction boundaries.
 - Public entitlement key endpoint and Ed25519 signing/key-ring services.
@@ -81,13 +83,11 @@ Implemented today:
 
 Still pending before AuthorForge can rely on the service end to end:
 
-- DB-backed checkout/session creation and subscription state application from received
-  Stripe webhook events.
 - Installation registration, activation, heartbeat, deactivation, and revocation routes.
 - Entitlement snapshot assembly from plan/grants/overrides and offline-lease issuance.
 - Usage reserve/commit/release/current endpoint wiring.
 - Admin handler implementations.
-- Outbox emit sites and deletion workflow endpoints.
+- Remaining non-Stripe outbox emit sites and deletion workflow endpoints.
 
 The router intentionally returns `NOT_IMPLEMENTED` for many protected handlers while
 still enforcing the correct auth boundary. That is a security feature of the current
@@ -275,7 +275,7 @@ The HTTP API uses JSON over HTTPS with base path `/v1`. The machine-readable con
 | `GET /v1/products` | implemented | Active product catalog rows. |
 | `GET /v1/plans` | implemented | Active plan rows. |
 | `GET /v1/entitlements/keys` | implemented | Published Ed25519 verification keys. |
-| `POST /v1/webhooks/stripe` | implemented receipt layer | Verifies Stripe signature, parses a minimal event envelope, stores/dedupes by Stripe event id, and explicitly ignores unsupported events. Subscription mutation remains pending. |
+| `POST /v1/webhooks/stripe` | implemented processing layer | Verifies Stripe signature, parses a minimal event envelope, stores/dedupes by Stripe event id, ignores unsupported events, and transactionally applies supported checkout/subscription/invoice state with audit + outbox. |
 
 ### Customer routes
 
@@ -309,6 +309,11 @@ idempotently and writes the initial status-history receipt for newly-created pro
 `GET /v1/account` returns the resolved customer/auth identifiers today. The remaining
 DB-backed customer handlers currently return `NOT_IMPLEMENTED` after auth and active
 customer checks pass.
+
+`POST /v1/checkout` is implemented for active customers. It resolves the active paid
+catalog plan server-side, creates a Stripe Checkout Session, stores the returned Stripe
+session id in `checkout_sessions`, and returns the hosted checkout URL. It does not
+activate subscriptions or entitlements.
 
 ### Admin routes
 
@@ -467,12 +472,15 @@ Stripe owns payment processing. ForgeCustomer stores normalized subscription pro
 used by product clients.
 
 Current pure logic maps Stripe subscription statuses into ForgeCustomer statuses and
-determines whether a status grants cloud access. Webhook receipt is live: the API verifies
-`Stripe-Signature`, parses a minimal non-PII event summary, stores the event id once, and
-marks unsupported events ignored. Checkout creation and subscription state application
-from received events remain pending. Only verified Stripe webhooks may change
-subscription truth; browser redirects must only confirm that the customer returned from
-Stripe.
+determines whether a status grants cloud access. Checkout creation is live for active paid
+catalog plans: the API resolves `plan_versions.stripe_price_id`, calls Stripe with the
+server-side secret, stores the returned session id, and returns the hosted URL. Webhook
+processing is also live: the API verifies `Stripe-Signature`, parses a minimal non-PII
+event summary, stores the event id once, marks unsupported events ignored, and applies
+supported checkout/subscription/invoice events in one transaction. Subscription changes
+write normalized projection rows, commercial audit, and sanitized `subscription_changed`
+outbox events. Only verified Stripe webhooks may change subscription truth; browser
+redirects must only confirm that the customer returned from Stripe.
 
 ### Licensing and installations
 
@@ -564,17 +572,19 @@ must never receive it.
 Stripe integration rules:
 
 - `STRIPE_SECRET_KEY` is server-side only.
+- Checkout creation resolves Stripe price ids from the catalog; clients provide product
+  and plan keys, never raw Stripe price ids.
 - `STRIPE_WEBHOOK_SECRET` verifies webhook signatures.
 - Webhook verification uses HMAC-SHA256 and constant-time comparison.
 - Duplicate and replayed webhook events are expected and must be idempotent.
-- The webhook route stores verified event envelopes once in `stripe_webhook_events`; event
-  application into subscription state is the follow-up commerce slice.
+- The webhook route stores verified event envelopes once in `stripe_webhook_events` and
+  applies supported checkout/subscription/invoice events transactionally.
 - Raw card data is never stored.
 - Raw webhook payload retention must be minimal and access-restricted.
 
-Checkout creation and subscription-state application are route-level MVP gaps today, but
-the signature verification, event parsing, idempotent receipt, and normalization
-primitives exist.
+Checkout creation, signature verification, event parsing, idempotent receipt, subscription
+projection, invoice references, audit writes, and sanitized subscription outbox emission
+exist. Entitlement snapshot assembly from those projected rows remains a later phase.
 
 ### DataForge outbox
 
@@ -808,6 +818,8 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 - JWT validator accepts valid tokens and rejects expired, wrong-audience, wrong-issuer,
   bad-signature, and unconfigured-secret cases.
 - Bearer header parsing.
+- Checkout request validation and Stripe Checkout Session form construction.
+- Stripe checkout/subscription/invoice event extraction for webhook processing.
 - Account provisioning input validation and customer-auth boundary.
 - Stripe webhook signature, parsing, missing/bad signature, and malformed signed-envelope
   rejection behavior.
@@ -825,13 +837,12 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 
 These are intentional MVP gaps and should not be hidden by documentation:
 
-- Checkout creation and received Stripe webhook state application.
 - Installation/device activation flow.
 - Entitlement snapshot assembly and offline lease issuance.
 - Usage reserve/commit/release/current route wiring.
 - Admin handler implementations.
 - Deletion workflow endpoints.
-- Outbox emit sites from the still-pending mutations.
+- Remaining non-Stripe outbox emit sites from the still-pending mutations.
 - End-to-end suites with live or mocked Stripe/Supabase/DataForge flows.
 
 ### Release standard

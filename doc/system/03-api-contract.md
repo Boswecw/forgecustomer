@@ -13,7 +13,7 @@ The HTTP API uses JSON over HTTPS with base path `/v1`. The machine-readable con
 | `GET /v1/products` | implemented | Active product catalog rows. |
 | `GET /v1/plans` | implemented | Active plan rows. |
 | `GET /v1/entitlements/keys` | implemented | Published Ed25519 verification keys. |
-| `POST /v1/webhooks/stripe` | implemented receipt layer | Verifies Stripe signature, parses a minimal event envelope, stores/dedupes by Stripe event id, and explicitly ignores unsupported events. Subscription mutation remains pending. |
+| `POST /v1/webhooks/stripe` | implemented processing layer | Verifies Stripe signature, parses a minimal event envelope, stores/dedupes by Stripe event id, ignores unsupported events, and transactionally applies supported checkout/subscription/invoice state with audit + outbox. |
 
 ### Customer routes
 
@@ -47,6 +47,11 @@ idempotently and writes the initial status-history receipt for newly-created pro
 `GET /v1/account` returns the resolved customer/auth identifiers today. The remaining
 DB-backed customer handlers currently return `NOT_IMPLEMENTED` after auth and active
 customer checks pass.
+
+`POST /v1/checkout` is implemented for active customers. It resolves the active paid
+catalog plan server-side, creates a Stripe Checkout Session, stores the returned Stripe
+session id in `checkout_sessions`, and returns the hosted checkout URL. It does not
+activate subscriptions or entitlements.
 
 ### Admin routes
 

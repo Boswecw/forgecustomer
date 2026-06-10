@@ -1,11 +1,16 @@
-//! Stripe integration. The security-critical webhook signature verification and minimal
-//! event-envelope parsing live here; Checkout/session creation and subscription state
-//! application are separate service/repository work.
+//! Stripe integration. The security-critical webhook signature verification, event
+//! extraction, and Checkout Session creation live here; durable subscription projection is
+//! applied by the commerce repository after signature verification.
 
+use chrono::{DateTime, TimeZone, Utc};
 use hmac::{Hmac, Mac};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
+use uuid::Uuid;
+
+use crate::domain::subscription::{normalize_stripe_status, SubscriptionStatus};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -21,6 +26,41 @@ pub enum WebhookError {
     NotConfigured,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum CheckoutError {
+    #[error("Stripe secret key is not configured")]
+    NotConfigured,
+    #[error("Stripe transport error: {0}")]
+    Transport(String),
+    #[error("Stripe Checkout returned status {0}")]
+    ApiStatus(u16),
+    #[error("Stripe Checkout response did not include a session id")]
+    MissingSessionId,
+    #[error("Stripe Checkout response did not include a checkout URL")]
+    MissingCheckoutUrl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckoutSessionRequest {
+    pub price_id: String,
+    pub customer_id: String,
+    pub plan_version_id: String,
+    pub success_url: String,
+    pub cancel_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckoutSession {
+    pub id: String,
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct StripeCheckoutSessionResponse {
+    id: Option<String>,
+    url: Option<String>,
+}
+
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum StripeEventError {
     #[error("malformed Stripe event payload")]
@@ -29,6 +69,73 @@ pub enum StripeEventError {
     MissingEventId,
     #[error("missing Stripe event type")]
     MissingEventType,
+}
+
+pub fn build_checkout_session_form(request: &CheckoutSessionRequest) -> Vec<(String, String)> {
+    vec![
+        ("mode".into(), "subscription".into()),
+        ("success_url".into(), request.success_url.clone()),
+        ("cancel_url".into(), request.cancel_url.clone()),
+        ("line_items[0][price]".into(), request.price_id.clone()),
+        ("line_items[0][quantity]".into(), "1".into()),
+        ("client_reference_id".into(), request.customer_id.clone()),
+        (
+            "metadata[forgecustomer_customer_id]".into(),
+            request.customer_id.clone(),
+        ),
+        (
+            "metadata[plan_version_id]".into(),
+            request.plan_version_id.clone(),
+        ),
+        (
+            "subscription_data[metadata][forgecustomer_customer_id]".into(),
+            request.customer_id.clone(),
+        ),
+        (
+            "subscription_data[metadata][plan_version_id]".into(),
+            request.plan_version_id.clone(),
+        ),
+        ("allow_promotion_codes".into(), "true".into()),
+    ]
+}
+
+pub async fn create_checkout_session(
+    http: &reqwest::Client,
+    secret_key: &str,
+    request: &CheckoutSessionRequest,
+    idempotency_key: Option<&str>,
+) -> Result<CheckoutSession, CheckoutError> {
+    if secret_key.is_empty() {
+        return Err(CheckoutError::NotConfigured);
+    }
+
+    let form = build_checkout_session_form(request);
+    let mut builder = http
+        .post("https://api.stripe.com/v1/checkout/sessions")
+        .bearer_auth(secret_key)
+        .form(&form);
+
+    if let Some(key) = idempotency_key.filter(|key| !key.trim().is_empty()) {
+        builder = builder.header("Idempotency-Key", key.trim());
+    }
+
+    let response = builder
+        .send()
+        .await
+        .map_err(|error| CheckoutError::Transport(error.to_string()))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(CheckoutError::ApiStatus(status.as_u16()));
+    }
+
+    let session: StripeCheckoutSessionResponse = response
+        .json()
+        .await
+        .map_err(|error| CheckoutError::Transport(error.to_string()))?;
+    Ok(CheckoutSession {
+        id: session.id.ok_or(CheckoutError::MissingSessionId)?,
+        url: session.url.ok_or(CheckoutError::MissingCheckoutUrl)?,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,12 +160,45 @@ pub struct ParsedStripeEvent {
     pub created: Option<i64>,
     pub object_id: Option<String>,
     pub object_type: Option<String>,
+    pub object: Value,
     pub payload_summary: Value,
     pub receipt_status: StripeWebhookReceiptStatus,
 }
 
-/// Events ForgeCustomer understands at receipt time. State application for these events
-/// lands in the follow-up commerce slice; unsupported events are acknowledged and ignored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StripeCheckoutCompleted {
+    pub stripe_checkout_session_id: String,
+    pub customer_id: Option<Uuid>,
+    pub plan_version_id: Option<Uuid>,
+    pub stripe_customer_id: Option<String>,
+    pub stripe_subscription_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StripeSubscriptionChange {
+    pub stripe_subscription_id: String,
+    pub stripe_customer_id: Option<String>,
+    pub customer_id: Option<Uuid>,
+    pub plan_version_id: Option<Uuid>,
+    pub stripe_price_id: Option<String>,
+    pub status: SubscriptionStatus,
+    pub current_period_start: Option<DateTime<Utc>>,
+    pub current_period_end: Option<DateTime<Utc>>,
+    pub cancel_at_period_end: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StripeInvoiceChange {
+    pub stripe_invoice_id: String,
+    pub stripe_subscription_id: String,
+    pub status: SubscriptionStatus,
+    pub invoice_status: String,
+    pub amount_due_cents: Option<i64>,
+    pub currency: Option<String>,
+}
+
+/// Events ForgeCustomer understands at receipt time. Supported events are transactionally
+/// applied by the commerce repository; unsupported events are acknowledged and ignored.
 pub fn is_supported_webhook_event(event_type: &str) -> bool {
     matches!(
         event_type,
@@ -73,6 +213,54 @@ pub fn is_supported_webhook_event(event_type: &str) -> bool {
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
     value.get(key)?.as_str().map(str::to_string)
+}
+
+fn bool_field(value: &Value, key: &str) -> Option<bool> {
+    value.get(key)?.as_bool()
+}
+
+fn integer_field(value: &Value, key: &str) -> Option<i64> {
+    value.get(key)?.as_i64()
+}
+
+fn uuid_field(value: &Value, key: &str) -> Option<Uuid> {
+    string_field(value, key).and_then(|value| Uuid::parse_str(&value).ok())
+}
+
+fn metadata_string(value: &Value, key: &str) -> Option<String> {
+    value.get("metadata").and_then(|v| string_field(v, key))
+}
+
+fn metadata_uuid(value: &Value, key: &str) -> Option<Uuid> {
+    metadata_string(value, key).and_then(|value| Uuid::parse_str(&value).ok())
+}
+
+fn unix_seconds(value: Option<i64>) -> Option<DateTime<Utc>> {
+    Utc.timestamp_opt(value?, 0).single()
+}
+
+fn subscription_price_id(value: &Value) -> Option<String> {
+    let first_item = value.get("items")?.get("data")?.as_array()?.first()?;
+    first_item
+        .get("price")
+        .and_then(|price| string_field(price, "id"))
+        .or_else(|| {
+            first_item
+                .get("plan")
+                .and_then(|plan| string_field(plan, "id"))
+        })
+}
+
+fn invoice_status(event_type: &str, object: &Value) -> String {
+    let raw = string_field(object, "status").unwrap_or_else(|| match event_type {
+        "invoice.paid" => "paid".to_string(),
+        _ => "open".to_string(),
+    });
+    match raw.as_str() {
+        "paid" | "open" | "void" | "uncollectible" | "draft" => raw,
+        _ if event_type == "invoice.paid" => "paid".to_string(),
+        _ => "open".to_string(),
+    }
 }
 
 /// Parse a verified Stripe event payload into a minimal, non-PII summary.
@@ -109,9 +297,80 @@ pub fn parse_event(payload: &[u8]) -> Result<ParsedStripeEvent, StripeEventError
         created,
         object_id,
         object_type,
+        object,
         payload_summary,
         receipt_status,
     })
+}
+
+impl ParsedStripeEvent {
+    pub fn created_at(&self) -> Option<DateTime<Utc>> {
+        unix_seconds(self.created)
+    }
+
+    pub fn checkout_completed(&self) -> Option<StripeCheckoutCompleted> {
+        if self.event_type != "checkout.session.completed" {
+            return None;
+        }
+        Some(StripeCheckoutCompleted {
+            stripe_checkout_session_id: string_field(&self.object, "id")?,
+            customer_id: metadata_uuid(&self.object, "forgecustomer_customer_id")
+                .or_else(|| uuid_field(&self.object, "client_reference_id")),
+            plan_version_id: metadata_uuid(&self.object, "plan_version_id"),
+            stripe_customer_id: string_field(&self.object, "customer"),
+            stripe_subscription_id: string_field(&self.object, "subscription"),
+        })
+    }
+
+    pub fn subscription_change(&self) -> Option<StripeSubscriptionChange> {
+        if !matches!(
+            self.event_type.as_str(),
+            "customer.subscription.created"
+                | "customer.subscription.updated"
+                | "customer.subscription.deleted"
+        ) {
+            return None;
+        }
+        let raw_status = string_field(&self.object, "status").unwrap_or_else(|| {
+            if self.event_type == "customer.subscription.deleted" {
+                "canceled".to_string()
+            } else {
+                "incomplete".to_string()
+            }
+        });
+        Some(StripeSubscriptionChange {
+            stripe_subscription_id: string_field(&self.object, "id")?,
+            stripe_customer_id: string_field(&self.object, "customer"),
+            customer_id: metadata_uuid(&self.object, "forgecustomer_customer_id"),
+            plan_version_id: metadata_uuid(&self.object, "plan_version_id"),
+            stripe_price_id: subscription_price_id(&self.object),
+            status: normalize_stripe_status(&raw_status),
+            current_period_start: unix_seconds(integer_field(&self.object, "current_period_start")),
+            current_period_end: unix_seconds(integer_field(&self.object, "current_period_end")),
+            cancel_at_period_end: bool_field(&self.object, "cancel_at_period_end").unwrap_or(false),
+        })
+    }
+
+    pub fn invoice_change(&self) -> Option<StripeInvoiceChange> {
+        if !matches!(
+            self.event_type.as_str(),
+            "invoice.paid" | "invoice.payment_failed"
+        ) {
+            return None;
+        }
+        Some(StripeInvoiceChange {
+            stripe_invoice_id: string_field(&self.object, "id")?,
+            stripe_subscription_id: string_field(&self.object, "subscription")?,
+            status: if self.event_type == "invoice.paid" {
+                SubscriptionStatus::Active
+            } else {
+                SubscriptionStatus::PastDue
+            },
+            invoice_status: invoice_status(&self.event_type, &self.object),
+            amount_due_cents: integer_field(&self.object, "amount_due"),
+            currency: string_field(&self.object, "currency"),
+        })
+    }
 }
 
 /// Verify a Stripe webhook signature.
@@ -259,6 +518,25 @@ mod tests {
     }
 
     #[test]
+    fn checkout_session_form_uses_server_side_subscription_mode() {
+        let form = build_checkout_session_form(&CheckoutSessionRequest {
+            price_id: "price_123".into(),
+            customer_id: "cust_uuid".into(),
+            plan_version_id: "plan_version_uuid".into(),
+            success_url: "https://example.com/success".into(),
+            cancel_url: "https://example.com/cancel".into(),
+        });
+
+        assert!(form.contains(&("mode".into(), "subscription".into())));
+        assert!(form.contains(&("line_items[0][price]".into(), "price_123".into())));
+        assert!(form.contains(&("client_reference_id".into(), "cust_uuid".into())));
+        assert!(form.contains(&(
+            "subscription_data[metadata][plan_version_id]".into(),
+            "plan_version_uuid".into()
+        )));
+    }
+
+    #[test]
     fn parses_supported_event_summary_without_customer_pii() {
         let parsed = parse_event(
             br#"{
@@ -276,6 +554,100 @@ mod tests {
         assert_eq!(parsed.object_type.as_deref(), Some("subscription"));
         assert_eq!(parsed.receipt_status, StripeWebhookReceiptStatus::Received);
         assert!(parsed.payload_summary.get("customer").is_none());
+    }
+
+    #[test]
+    fn extracts_checkout_completion_references() {
+        let customer_id = Uuid::new_v4();
+        let plan_version_id = Uuid::new_v4();
+        let payload = format!(
+            r#"{{
+              "id":"evt_checkout",
+              "type":"checkout.session.completed",
+              "created":1700000000,
+              "data":{{"object":{{
+                "id":"cs_test_1",
+                "object":"checkout.session",
+                "customer":"cus_123",
+                "subscription":"sub_123",
+                "metadata":{{
+                  "forgecustomer_customer_id":"{customer_id}",
+                  "plan_version_id":"{plan_version_id}"
+                }}
+              }}}}
+            }}"#
+        );
+        let parsed = parse_event(payload.as_bytes()).expect("event");
+        let checkout = parsed.checkout_completed().expect("checkout completion");
+
+        assert_eq!(checkout.stripe_checkout_session_id, "cs_test_1");
+        assert_eq!(checkout.customer_id, Some(customer_id));
+        assert_eq!(checkout.plan_version_id, Some(plan_version_id));
+        assert_eq!(checkout.stripe_customer_id.as_deref(), Some("cus_123"));
+        assert_eq!(checkout.stripe_subscription_id.as_deref(), Some("sub_123"));
+    }
+
+    #[test]
+    fn extracts_subscription_change_with_plan_metadata_and_price() {
+        let customer_id = Uuid::new_v4();
+        let plan_version_id = Uuid::new_v4();
+        let payload = format!(
+            r#"{{
+              "id":"evt_sub",
+              "type":"customer.subscription.updated",
+              "created":1700000000,
+              "data":{{"object":{{
+                "id":"sub_123",
+                "object":"subscription",
+                "customer":"cus_123",
+                "status":"active",
+                "current_period_start":1700000000,
+                "current_period_end":1702592000,
+                "cancel_at_period_end":false,
+                "metadata":{{
+                  "forgecustomer_customer_id":"{customer_id}",
+                  "plan_version_id":"{plan_version_id}"
+                }},
+                "items":{{"data":[{{"price":{{"id":"price_123"}}}}]}}
+              }}}}
+            }}"#
+        );
+        let parsed = parse_event(payload.as_bytes()).expect("event");
+        let change = parsed.subscription_change().expect("subscription change");
+
+        assert_eq!(change.stripe_subscription_id, "sub_123");
+        assert_eq!(change.customer_id, Some(customer_id));
+        assert_eq!(change.plan_version_id, Some(plan_version_id));
+        assert_eq!(change.stripe_price_id.as_deref(), Some("price_123"));
+        assert_eq!(change.status, SubscriptionStatus::Active);
+        assert!(change.current_period_end.is_some());
+    }
+
+    #[test]
+    fn extracts_invoice_payment_failure_as_past_due() {
+        let parsed = parse_event(
+            br#"{
+              "id":"evt_invoice",
+              "type":"invoice.payment_failed",
+              "created":1700000000,
+              "data":{"object":{
+                "id":"in_123",
+                "object":"invoice",
+                "subscription":"sub_123",
+                "status":"open",
+                "amount_due":2999,
+                "currency":"usd"
+              }}
+            }"#,
+        )
+        .expect("event");
+        let invoice = parsed.invoice_change().expect("invoice change");
+
+        assert_eq!(invoice.stripe_invoice_id, "in_123");
+        assert_eq!(invoice.stripe_subscription_id, "sub_123");
+        assert_eq!(invoice.status, SubscriptionStatus::PastDue);
+        assert_eq!(invoice.invoice_status, "open");
+        assert_eq!(invoice.amount_due_cents, Some(2999));
     }
 
     #[test]

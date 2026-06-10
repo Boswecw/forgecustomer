@@ -17,17 +17,19 @@ must never receive it.
 Stripe integration rules:
 
 - `STRIPE_SECRET_KEY` is server-side only.
+- Checkout creation resolves Stripe price ids from the catalog; clients provide product
+  and plan keys, never raw Stripe price ids.
 - `STRIPE_WEBHOOK_SECRET` verifies webhook signatures.
 - Webhook verification uses HMAC-SHA256 and constant-time comparison.
 - Duplicate and replayed webhook events are expected and must be idempotent.
-- The webhook route stores verified event envelopes once in `stripe_webhook_events`; event
-  application into subscription state is the follow-up commerce slice.
+- The webhook route stores verified event envelopes once in `stripe_webhook_events` and
+  applies supported checkout/subscription/invoice events transactionally.
 - Raw card data is never stored.
 - Raw webhook payload retention must be minimal and access-restricted.
 
-Checkout creation and subscription-state application are route-level MVP gaps today, but
-the signature verification, event parsing, idempotent receipt, and normalization
-primitives exist.
+Checkout creation, signature verification, event parsing, idempotent receipt, subscription
+projection, invoice references, audit writes, and sanitized subscription outbox emission
+exist. Entitlement snapshot assembly from those projected rows remains a later phase.
 
 ### DataForge outbox
 

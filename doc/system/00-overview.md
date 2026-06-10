@@ -23,8 +23,10 @@ Implemented today:
   headers.
 - API-owned account provisioning that maps a Supabase auth subject to one ForgeCustomer
   business customer profile idempotently.
-- Stripe webhook signature verification, minimal non-PII event parsing, and idempotent
-  webhook receipt/dedupe.
+- Stripe Checkout Session creation for active paid catalog plans.
+- Stripe webhook signature verification, minimal non-PII event parsing, idempotent
+  processing, subscription projection, invoice reference recording, commercial audit, and
+  sanitized `subscription_changed` outbox emission.
 - Public product and plan catalog endpoints backed by SQLx repositories.
 - Customer and admin JWT extraction boundaries.
 - Public entitlement key endpoint and Ed25519 signing/key-ring services.
@@ -38,13 +40,11 @@ Implemented today:
 
 Still pending before AuthorForge can rely on the service end to end:
 
-- DB-backed checkout/session creation and subscription state application from received
-  Stripe webhook events.
 - Installation registration, activation, heartbeat, deactivation, and revocation routes.
 - Entitlement snapshot assembly from plan/grants/overrides and offline-lease issuance.
 - Usage reserve/commit/release/current endpoint wiring.
 - Admin handler implementations.
-- Outbox emit sites and deletion workflow endpoints.
+- Remaining non-Stripe outbox emit sites and deletion workflow endpoints.
 
 The router intentionally returns `NOT_IMPLEMENTED` for many protected handlers while
 still enforcing the correct auth boundary. That is a security feature of the current

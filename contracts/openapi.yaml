@@ -192,13 +192,24 @@ paths:
     post:
       tags: [checkout]
       summary: Create a Stripe Checkout session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CheckoutCreateRequest" }
       responses:
-        "200": { description: Redirect URL (does NOT activate entitlements) }
+        "200":
+          description: Redirect URL (does NOT activate entitlements)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CheckoutCreateResponse" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: No active checkout plan matched the request }
+        "422": { description: Checkout request validation failed }
   /v1/webhooks/stripe:
     post:
       tags: [webhooks]
-      summary: Stripe webhook receiver (signature-verified; idempotent receipt)
+      summary: Stripe webhook receiver (signature-verified; idempotent processing)
       security: []
       responses:
         "200":
@@ -300,6 +311,31 @@ components:
         created:
           type: boolean
           description: True when this request inserted the profile; false when it returned an existing one.
+    CheckoutCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [plan_key, success_url, cancel_url]
+      properties:
+        product_key:
+          type: ["string", "null"]
+          default: authorforge
+        plan_key:
+          type: string
+          examples: ["authorforge_pro"]
+        success_url:
+          type: string
+          format: uri
+        cancel_url:
+          type: string
+          format: uri
+    CheckoutCreateResponse:
+      type: object
+      required: [checkout_session_id, stripe_checkout_session_id, checkout_url, status]
+      properties:
+        checkout_session_id: { type: string, format: uuid }
+        stripe_checkout_session_id: { type: string, examples: ["cs_test_123"] }
+        checkout_url: { type: string, format: uri }
+        status: { type: string, examples: ["created"] }
     StripeWebhookResponse:
       type: object
       required: [received, duplicate, event_id, event_type, status]

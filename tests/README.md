@@ -6,8 +6,8 @@ ForgeCustomer's test strategy spans three layers.
 
 | Suite | Location | What it covers |
 | ----- | -------- | -------------- |
-| Unit (domain/services/integrations) | `api/src/**/tests` (`cargo test`) | subscription normalization, entitlement precedence, signed-snapshot sign/verify + key rotation, quota decisions, device-limit & offline-lease rules, outbox redaction, Stripe webhook signature verification (valid/tampered/wrong-secret/replay/malformed), outbox backoff |
-| Security integration | `api/tests/security.rs` | unauthenticated routes fail closed; **customer token cannot access admin route**; valid operator token clears admin auth; error contract shape |
+| Unit (domain/services/integrations) | `api/src/**/tests` (`cargo test`) | customer provisioning validation, subscription normalization, entitlement precedence, signed-snapshot sign/verify + key rotation, quota decisions, device-limit & offline-lease rules, outbox redaction, Stripe webhook signature verification (valid/tampered/wrong-secret/replay/malformed), outbox backoff |
+| Security integration | `api/tests/security.rs` | unauthenticated routes fail closed; **customer token cannot access admin route**; valid operator token clears admin auth; account provisioning auth/input boundary; error contract shape |
 | Migration + RLS | `.github/workflows/ci.yml` (`migrations` job) | clean apply, **deterministic reruns**, idempotent seed, **RLS enabled on every table**, append-only ledger rejects UPDATE |
 
 Run locally:
@@ -22,6 +22,7 @@ cargo test --all          # unit + security integration
 From the plan — ✅ covered today, 🔜 pending DB-backed flow wiring:
 
 - ✅ Customer cannot call admin route
+- ✅ Account provisioning requires a valid customer JWT and rejects invalid profile input
 - ✅ Invalid / expired / wrong-audience / wrong-issuer / bad-signature JWT rejected
 - ✅ Webhook with invalid signature rejected; duplicate-by-timestamp replay rejected
 - ✅ Forged entitlement snapshot fails verification

@@ -18,9 +18,12 @@ The HTTP API uses JSON over HTTPS with base path `/v1`. The machine-readable con
 ### Customer routes
 
 Customer routes require a valid Supabase JWT and an active ForgeCustomer customer profile.
+The exception is `POST /v1/account/provision`, which requires a valid Supabase JWT but
+does not require an existing profile because it is the controlled profile-creation flow.
 Current route surface:
 
 - `GET /v1/account`
+- `POST /v1/account/provision`
 - `GET /v1/subscriptions`
 - `GET /v1/licenses`
 - `GET /v1/installations`
@@ -39,6 +42,8 @@ Current route surface:
 - `GET /v1/usage/current`
 - `POST /v1/checkout`
 
+`POST /v1/account/provision` creates or returns the caller's business customer profile
+idempotently and writes the initial status-history receipt for newly-created profiles.
 `GET /v1/account` returns the resolved customer/auth identifiers today. The remaining
 DB-backed customer handlers currently return `NOT_IMPLEMENTED` after auth and active
 customer checks pass.

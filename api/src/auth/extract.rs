@@ -10,7 +10,7 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use uuid::Uuid;
 
-use crate::auth::{bearer_token, AdminContext, CustomerContext};
+use crate::auth::{bearer_token, AdminContext, AuthUserContext, CustomerContext};
 use crate::error::{AppError, ErrorCode};
 use crate::middleware::CorrelationId;
 use crate::state::AppState;
@@ -78,6 +78,34 @@ impl CustomerContext {
             ));
         }
         Ok(id)
+    }
+}
+
+#[async_trait]
+impl FromRequestParts<AppState> for AuthUserContext {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AppError> {
+        let corr = correlation(parts);
+        let attach = |e: AppError| match &corr {
+            Some(id) => e.with_correlation(id.clone()),
+            None => e,
+        };
+
+        let token = bearer_token(auth_header(parts)).map_err(attach)?;
+        let claims = state.customer_validator.validate(token).map_err(attach)?;
+
+        let auth_user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
+            attach(AppError::new(
+                ErrorCode::InvalidToken,
+                "Token subject is not a valid user id.",
+            ))
+        })?;
+
+        Ok(AuthUserContext {
+            auth_user_id,
+            email: claims.email,
+        })
     }
 }
 

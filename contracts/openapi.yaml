@@ -65,6 +65,27 @@ paths:
         "200": { description: Account summary }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/account/provision:
+    post:
+      tags: [account]
+      summary: Create or return the caller's ForgeCustomer profile
+      description: >
+        API-owned profile provisioning for a Supabase-authenticated user. The request may
+        supply display/localization decoration only; customer type and commercial status
+        are assigned by the server. Repeated calls are idempotent for the same auth user.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccountProvisionRequest" }
+      responses:
+        "200":
+          description: Provisioned or existing customer profile
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccountProvisionResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { description: Profile validation failed }
   /v1/subscriptions:
     get:
       tags: [subscriptions]
@@ -252,6 +273,29 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    AccountProvisionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        display_name: { type: ["string", "null"], maxLength: 120 }
+        country_code:
+          type: ["string", "null"]
+          description: Two-letter ISO country code; normalized to uppercase.
+        timezone: { type: ["string", "null"], maxLength: 80 }
+    AccountProvisionResponse:
+      type: object
+      required: [customer_id, auth_user_id, customer_type, status, created]
+      properties:
+        customer_id: { type: string, format: uuid }
+        auth_user_id: { type: string, format: uuid }
+        customer_type: { type: string, examples: ["individual"] }
+        display_name: { type: ["string", "null"] }
+        status: { type: string, examples: ["active"] }
+        country_code: { type: ["string", "null"] }
+        timezone: { type: ["string", "null"] }
+        created:
+          type: boolean
+          description: True when this request inserted the profile; false when it returned an existing one.
     Error:
       type: object
       required: [error]

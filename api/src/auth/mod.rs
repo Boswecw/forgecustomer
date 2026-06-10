@@ -18,6 +18,10 @@ use crate::error::{AppError, ErrorCode};
 pub struct Claims {
     /// Subject — Supabase auth user id (customer) or operator id (admin).
     pub sub: String,
+    /// Optional Supabase email claim. ForgeCustomer may project it into customer contact
+    /// records, but Supabase Auth remains the login/email-verification authority.
+    #[serde(default)]
+    pub email: Option<String>,
     #[serde(default)]
     pub role: Option<String>,
     /// Operator roles/capabilities (admin tokens).
@@ -96,6 +100,13 @@ impl CustomerContext {
     pub fn is_suspended(&self) -> bool {
         matches!(self.status.as_deref(), Some("suspended"))
     }
+}
+
+/// Supabase-authenticated user context before a ForgeCustomer business profile exists.
+#[derive(Debug, Clone)]
+pub struct AuthUserContext {
+    pub auth_user_id: Uuid,
+    pub email: Option<String>,
 }
 
 /// Resolved admin/operator context.

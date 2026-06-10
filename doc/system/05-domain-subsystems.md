@@ -15,6 +15,13 @@ status. Customer route access requires:
 
 Missing profile fails closed as `FORBIDDEN`.
 
+Profile provisioning is the controlled exception: `POST /v1/account/provision` validates
+the Supabase JWT, inserts one `customer_profiles` row for the token subject, writes an
+initial `customer_status_history` row, projects the trusted Supabase email claim into
+`customer_emails` when present, and returns the existing profile on repeat calls. The
+endpoint accepts only display/localization decoration; customer type and commercial status
+remain server-owned.
+
 ### Commerce and Stripe
 
 Stripe owns payment processing. ForgeCustomer stores normalized subscription projection

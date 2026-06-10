@@ -64,6 +64,8 @@ Implemented today:
 - Environment-driven configuration with fail-closed token verification.
 - Axum router, liveness/readiness/version endpoints, correlation IDs, and security
   headers.
+- API-owned account provisioning that maps a Supabase auth subject to one ForgeCustomer
+  business customer profile idempotently.
 - Public product and plan catalog endpoints backed by SQLx repositories.
 - Customer and admin JWT extraction boundaries.
 - Public entitlement key endpoint and Ed25519 signing/key-ring services.
@@ -77,7 +79,6 @@ Implemented today:
 
 Still pending before AuthorForge can rely on the service end to end:
 
-- Supabase Auth to customer-profile provisioning flow.
 - DB-backed checkout/session and Stripe webhook handlers.
 - Installation registration, activation, heartbeat, deactivation, and revocation routes.
 - Entitlement snapshot assembly from plan/grants/overrides and offline-lease issuance.
@@ -234,10 +235,12 @@ available. `/v1/ready` is the deploy/load-balancer gate because it executes `sel
 2. `security_headers` middleware adds conservative response headers.
 3. Customer/admin extractors parse `Authorization: Bearer <jwt>`.
 4. The matching JWT validator checks signature, issuer, audience, and expiry.
-5. Customer requests resolve `auth_user_id` to a ForgeCustomer business customer row.
-6. `CustomerContext::require_active()` fails closed for missing profiles or suspended
+5. New customers call `POST /v1/account/provision`; this validates the Supabase JWT and
+   creates or returns the ForgeCustomer business customer row for the token subject.
+6. Customer requests resolve `auth_user_id` to a ForgeCustomer business customer row.
+7. `CustomerContext::require_active()` fails closed for missing profiles or suspended
    customers.
-7. Handlers call repositories/services and return either JSON success or the shared error
+8. Handlers call repositories/services and return either JSON success or the shared error
    contract.
 
 ### Route implementation status
@@ -274,9 +277,12 @@ The HTTP API uses JSON over HTTPS with base path `/v1`. The machine-readable con
 ### Customer routes
 
 Customer routes require a valid Supabase JWT and an active ForgeCustomer customer profile.
+The exception is `POST /v1/account/provision`, which requires a valid Supabase JWT but
+does not require an existing profile because it is the controlled profile-creation flow.
 Current route surface:
 
 - `GET /v1/account`
+- `POST /v1/account/provision`
 - `GET /v1/subscriptions`
 - `GET /v1/licenses`
 - `GET /v1/installations`
@@ -295,6 +301,8 @@ Current route surface:
 - `GET /v1/usage/current`
 - `POST /v1/checkout`
 
+`POST /v1/account/provision` creates or returns the caller's business customer profile
+idempotently and writes the initial status-history receipt for newly-created profiles.
 `GET /v1/account` returns the resolved customer/auth identifiers today. The remaining
 DB-backed customer handlers currently return `NOT_IMPLEMENTED` after auth and active
 customer checks pass.
@@ -442,6 +450,13 @@ status. Customer route access requires:
 4. Non-suspended status for privileged product actions.
 
 Missing profile fails closed as `FORBIDDEN`.
+
+Profile provisioning is the controlled exception: `POST /v1/account/provision` validates
+the Supabase JWT, inserts one `customer_profiles` row for the token subject, writes an
+initial `customer_status_history` row, projects the trusted Supabase email claim into
+`customer_emails` when present, and returns the existing profile on repeat calls. The
+endpoint accepts only display/localization decoration; customer type and commercial status
+remain server-owned.
 
 ### Commerce and Stripe
 
@@ -784,6 +799,7 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 - JWT validator accepts valid tokens and rejects expired, wrong-audience, wrong-issuer,
   bad-signature, and unconfigured-secret cases.
 - Bearer header parsing.
+- Account provisioning input validation and customer-auth boundary.
 - Customer token cannot access admin route.
 - Unauthenticated admin route is rejected.
 - Valid operator token reaches pending admin handler and returns `NOT_IMPLEMENTED`.
@@ -798,7 +814,6 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 
 These are intentional MVP gaps and should not be hidden by documentation:
 
-- Customer profile provisioning from Supabase Auth.
 - Checkout creation and Stripe webhook state mutation.
 - Installation/device activation flow.
 - Entitlement snapshot assembly and offline lease issuance.

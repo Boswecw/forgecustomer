@@ -30,6 +30,7 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 - JWT validator accepts valid tokens and rejects expired, wrong-audience, wrong-issuer,
   bad-signature, and unconfigured-secret cases.
 - Bearer header parsing.
+- Account provisioning input validation and customer-auth boundary.
 - Customer token cannot access admin route.
 - Unauthenticated admin route is rejected.
 - Valid operator token reaches pending admin handler and returns `NOT_IMPLEMENTED`.
@@ -44,7 +45,6 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 
 These are intentional MVP gaps and should not be hidden by documentation:
 
-- Customer profile provisioning from Supabase Auth.
 - Checkout creation and Stripe webhook state mutation.
 - Installation/device activation flow.
 - Entitlement snapshot assembly and offline lease issuance.

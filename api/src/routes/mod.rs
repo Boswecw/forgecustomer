@@ -11,11 +11,17 @@ pub mod health;
 
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use uuid::Uuid;
 
-use crate::auth::{AdminContext, CustomerContext};
+use crate::auth::{AdminContext, AuthUserContext, CustomerContext};
+use crate::domain::customer::{
+    normalize_email_claim, validate_provision_profile, ProvisionProfileInput,
+};
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::middleware as mw;
+use crate::repositories::customers;
 use crate::state::AppState;
 
 /// Assemble the full application router.
@@ -30,6 +36,7 @@ pub fn build_router(state: AppState) -> Router {
 
     let customer = Router::new()
         .route("/v1/account", get(account_get))
+        .route("/v1/account/provision", post(account_provision))
         .route("/v1/subscriptions", get(subscriptions_get))
         .route("/v1/licenses", get(licenses_get))
         .route(
@@ -92,6 +99,25 @@ fn pending(what: &str) -> AppError {
     )
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct ProvisionAccountRequest {
+    display_name: Option<String>,
+    country_code: Option<String>,
+    timezone: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AccountProvisionResponse {
+    customer_id: Uuid,
+    auth_user_id: Uuid,
+    customer_type: String,
+    display_name: Option<String>,
+    status: String,
+    country_code: Option<String>,
+    timezone: Option<String>,
+    created: bool,
+}
+
 // --- Customer endpoints (auth enforced via CustomerContext) ----------------
 
 async fn account_get(ctx: CustomerContext) -> AppResult<Json<Value>> {
@@ -100,6 +126,42 @@ async fn account_get(ctx: CustomerContext) -> AppResult<Json<Value>> {
     Ok(Json(
         json!({ "customer_id": id, "auth_user_id": ctx.auth_user_id }),
     ))
+}
+
+async fn account_provision(
+    auth: AuthUserContext,
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Json(request): Json<ProvisionAccountRequest>,
+) -> AppResult<Json<AccountProvisionResponse>> {
+    let validated = validate_provision_profile(ProvisionProfileInput {
+        display_name: request.display_name.as_deref(),
+        country_code: request.country_code.as_deref(),
+        timezone: request.timezone.as_deref(),
+    })
+    .map_err(|err| AppError::validation(err.message).with_details(json!({ "field": err.field })))?;
+
+    let email = normalize_email_claim(auth.email.as_deref());
+    let provisioned = customers::provision_for_auth_user(
+        &state.pool,
+        auth.auth_user_id,
+        email.as_deref(),
+        validated.display_name.as_deref(),
+        validated.country_code.as_deref(),
+        validated.timezone.as_deref(),
+    )
+    .await?;
+
+    let profile = provisioned.profile;
+    Ok(Json(AccountProvisionResponse {
+        customer_id: profile.id,
+        auth_user_id: profile.auth_user_id,
+        customer_type: profile.customer_type,
+        display_name: profile.display_name,
+        status: profile.status,
+        country_code: profile.country_code,
+        timezone: profile.timezone,
+        created: provisioned.created,
+    }))
 }
 
 async fn subscriptions_get(ctx: CustomerContext) -> AppResult<Json<Value>> {

@@ -42,13 +42,15 @@ added as data, not as schema redesigns.
 ## Request lifecycle (customer)
 
 1. Client authenticates with Supabase Auth and receives a short-lived JWT.
-2. Client calls the ForgeCustomer API with the JWT.
-3. Middleware assigns a correlation ID, validates the JWT (issuer/audience/exp),
+2. New clients call `POST /v1/account/provision` once to create or retrieve the
+   ForgeCustomer business `customer_id` for the JWT subject.
+3. Client calls the ForgeCustomer API with the JWT.
+4. Middleware assigns a correlation ID, validates the JWT (issuer/audience/exp),
    resolves the **customer context** (maps `auth_user_id` → ForgeCustomer customer), and
    enforces status (suspended customers are blocked from privileged actions).
-4. The route handler invokes a service; services use repositories; privileged mutations
+5. The route handler invokes a service; services use repositories; privileged mutations
    write an audit event and (where relevant) an outbox event in the same transaction.
-5. Responses follow the error contract on failure (`docs/API.md`).
+6. Responses follow the error contract on failure (`docs/API.md`).
 
 ## Subsystems
 

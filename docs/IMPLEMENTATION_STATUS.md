@@ -12,7 +12,7 @@ same change as implementation.
 | ----- | ---- | ------ | ----- |
 | 0 | Architecture lock (docs) | ✅ | SYSTEM, DATA_AUTHORITY, SECURITY + domain docs |
 | 1 | Supabase foundation | ✅ | 10 migrations; clean + deterministic apply; idempotent seed |
-| 2 | Customer identity model | 🟡 | tables + RLS done; profile-creation flow pending |
+| 2 | Customer identity model | ✅ | tables + RLS done; API-owned profile provisioning live and idempotent |
 | 3 | Product catalog | ✅ | versioned plans/features/quotas; AuthorForge seeded; `/v1/products`,`/v1/plans` live |
 | 4 | API foundation | ✅ | health/ready/version, middleware, error contract, JWT auth, context extractors |
 | 5 | Commerce & Stripe | 🟡 | schema + webhook signature verification + normalization logic; checkout/webhook handlers pending |
@@ -25,7 +25,7 @@ same change as implementation.
 | 12 | Privacy & deletion | 🟡 | schema + workflow doc; endpoints pending |
 | 18 | RLS | ✅ | enabled on all tables; read-own + public-catalog policies; CI asserts coverage |
 | 19 | Security hardening | 🟡 | JWT issuer/audience/exp, constant-time webhook verify, key rotation, security headers; rate limiting + cargo-audit in CI |
-| 21 | Testing | 🟡 | 44 unit + 5 security integration tests; e2e suites deferred (see `tests/README.md`) |
+| 21 | Testing | 🟡 | 48 unit + 7 security integration tests; DB-backed e2e suites deferred (see `tests/README.md`) |
 | 22 | Documentation | ✅ | all docs present; kept in-sync with code |
 | 23 | CI | ✅ | fmt, clippy -D warnings, test, migration determinism, RLS assert, OpenAPI lint, secret scan, audit |
 
@@ -35,15 +35,14 @@ The schema, auth, crypto, and pure business logic for every MVP item exist and a
 What remains is the **DB-backed endpoint wiring** (handlers currently return
 `NOT_IMPLEMENTED` while enforcing the correct auth boundary):
 
-1. Supabase Auth → customer profile creation flow (Phase 2).
-2. Checkout session creation + Stripe webhook processing → subscription normalization
+1. Checkout session creation + Stripe webhook processing → subscription normalization
    (Phase 5), each writing audit + outbox in one transaction.
-3. Installation register/activate/heartbeat/deactivate with device-limit enforcement
+2. Installation register/activate/heartbeat/deactivate with device-limit enforcement
    (Phase 6).
-4. Entitlement snapshot assembly from plan/grants/overrides → sign → return (Phase 7);
+3. Entitlement snapshot assembly from plan/grants/overrides → sign → return (Phase 7);
    offline-lease issuance.
-5. Usage check/reserve/commit/release with idempotency (Phase 8).
-6. Admin handlers (suspend/restore/resync/issue/revoke/override/adjust/audit) (Phase 10).
-7. Outbox emit sites + deletion workflow endpoints (Phases 11–12).
+4. Usage check/reserve/commit/release with idempotency (Phase 8).
+5. Admin handlers (suspend/restore/resync/issue/revoke/override/adjust/audit) (Phase 10).
+6. Outbox emit sites + deletion workflow endpoints (Phases 11–12).
 
 Each lands with its endpoint tests and a docs update, per the execution rules.

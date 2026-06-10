@@ -40,7 +40,7 @@ Representative codes: `UNAUTHENTICATED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`,
 | `GET /v1/health`       | liveness                                            | none      |
 | `GET /v1/ready`        | readiness (DB reachable)                            | none      |
 | `GET /v1/version`      | build/version info                                  | none      |
-| `/v1/account`          | own profile, consent, deletion requests             | customer  |
+| `/v1/account`          | provision/read own profile, consent, deletion requests | customer  |
 | `/v1/products`         | public product catalog                              | optional  |
 | `/v1/plans`            | public plan catalog                                 | optional  |
 | `/v1/subscriptions`    | own subscription summary                            | customer  |
@@ -61,3 +61,24 @@ per-domain endpoint semantics, and Phase 10 of the plan for the admin surface.
 - `GET /v1/health` → `{ "status": "ok" }` (process is up).
 - `GET /v1/ready` → `200` when the database is reachable, else `503`.
 - `GET /v1/version` → `{ "service", "version", "git_sha", "app_env" }`.
+
+## Account provisioning
+
+`POST /v1/account/provision` is the controlled API-owned profile creation flow for a
+Supabase-authenticated user. It validates the customer JWT but does **not** require an
+existing ForgeCustomer profile. The server creates one business customer row for the
+token subject, writes the initial status history receipt, projects the trusted Supabase
+email claim when present, and returns the existing row on repeat calls.
+
+Clients may submit only profile decoration:
+
+```json
+{
+  "display_name": "Ada Lovelace",
+  "country_code": "US",
+  "timezone": "America/Kentucky/Louisville"
+}
+```
+
+Customer type, status, commercial records, licenses, entitlements, and usage state are
+server-owned and cannot be set by this endpoint.

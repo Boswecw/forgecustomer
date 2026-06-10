@@ -21,6 +21,8 @@ Implemented today:
 - Environment-driven configuration with fail-closed token verification.
 - Axum router, liveness/readiness/version endpoints, correlation IDs, and security
   headers.
+- API-owned account provisioning that maps a Supabase auth subject to one ForgeCustomer
+  business customer profile idempotently.
 - Public product and plan catalog endpoints backed by SQLx repositories.
 - Customer and admin JWT extraction boundaries.
 - Public entitlement key endpoint and Ed25519 signing/key-ring services.
@@ -34,7 +36,6 @@ Implemented today:
 
 Still pending before AuthorForge can rely on the service end to end:
 
-- Supabase Auth to customer-profile provisioning flow.
 - DB-backed checkout/session and Stripe webhook handlers.
 - Installation registration, activation, heartbeat, deactivation, and revocation routes.
 - Entitlement snapshot assembly from plan/grants/overrides and offline-lease issuance.

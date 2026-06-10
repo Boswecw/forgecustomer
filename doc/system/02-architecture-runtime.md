@@ -52,10 +52,12 @@ available. `/v1/ready` is the deploy/load-balancer gate because it executes `sel
 2. `security_headers` middleware adds conservative response headers.
 3. Customer/admin extractors parse `Authorization: Bearer <jwt>`.
 4. The matching JWT validator checks signature, issuer, audience, and expiry.
-5. Customer requests resolve `auth_user_id` to a ForgeCustomer business customer row.
-6. `CustomerContext::require_active()` fails closed for missing profiles or suspended
+5. New customers call `POST /v1/account/provision`; this validates the Supabase JWT and
+   creates or returns the ForgeCustomer business customer row for the token subject.
+6. Customer requests resolve `auth_user_id` to a ForgeCustomer business customer row.
+7. `CustomerContext::require_active()` fails closed for missing profiles or suspended
    customers.
-7. Handlers call repositories/services and return either JSON success or the shared error
+8. Handlers call repositories/services and return either JSON success or the shared error
    contract.
 
 ### Route implementation status

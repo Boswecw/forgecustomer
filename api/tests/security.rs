@@ -119,6 +119,43 @@ async fn public_health_needs_no_token() {
 }
 
 #[tokio::test]
+async fn account_provision_requires_customer_auth() {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/account/provision")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    assert_eq!(status_of(req).await, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn account_provision_validates_customer_profile_input_before_db_write() {
+    let token = jwt(
+        json!({ "sub": "11111111-1111-1111-1111-111111111111",
+                "email": "user@example.com",
+                "iss": SUPA_ISS, "aud": SUPA_AUD, "exp": now() + 3600 }),
+        SUPA_SECRET,
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/account/provision")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(json!({ "country_code": "USA" }).to_string()))
+        .unwrap();
+
+    let app = build_router(test_state());
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "VALIDATION_FAILED");
+    assert_eq!(body["error"]["details"]["field"], "country_code");
+}
+
+#[tokio::test]
 async fn error_responses_use_the_error_contract() {
     let req = Request::builder()
         .uri("/v1/admin/customers")

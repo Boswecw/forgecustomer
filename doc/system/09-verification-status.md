@@ -31,6 +31,8 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
   bad-signature, and unconfigured-secret cases.
 - Bearer header parsing.
 - Account provisioning input validation and customer-auth boundary.
+- Stripe webhook signature, parsing, missing/bad signature, and malformed signed-envelope
+  rejection behavior.
 - Customer token cannot access admin route.
 - Unauthenticated admin route is rejected.
 - Valid operator token reaches pending admin handler and returns `NOT_IMPLEMENTED`.
@@ -45,7 +47,7 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 
 These are intentional MVP gaps and should not be hidden by documentation:
 
-- Checkout creation and Stripe webhook state mutation.
+- Checkout creation and received Stripe webhook state application.
 - Installation/device activation flow.
 - Entitlement snapshot assembly and offline lease issuance.
 - Usage reserve/commit/release/current route wiring.

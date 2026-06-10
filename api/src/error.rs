@@ -14,6 +14,7 @@ pub enum ErrorCode {
     TokenExpired,
     WrongAudience,
     Forbidden,
+    BadRequest,
     CustomerSuspended,
     NotFound,
     Conflict,
@@ -36,6 +37,7 @@ impl ErrorCode {
             ErrorCode::TokenExpired => "TOKEN_EXPIRED",
             ErrorCode::WrongAudience => "WRONG_AUDIENCE",
             ErrorCode::Forbidden => "FORBIDDEN",
+            ErrorCode::BadRequest => "BAD_REQUEST",
             ErrorCode::CustomerSuspended => "CUSTOMER_SUSPENDED",
             ErrorCode::NotFound => "NOT_FOUND",
             ErrorCode::Conflict => "CONFLICT",
@@ -60,6 +62,7 @@ impl ErrorCode {
             ErrorCode::Forbidden | ErrorCode::CustomerSuspended | ErrorCode::Revoked => {
                 StatusCode::FORBIDDEN
             }
+            ErrorCode::BadRequest => StatusCode::BAD_REQUEST,
             ErrorCode::NotFound => StatusCode::NOT_FOUND,
             ErrorCode::Conflict | ErrorCode::IdempotencyReplay => StatusCode::CONFLICT,
             ErrorCode::ValidationFailed => StatusCode::UNPROCESSABLE_ENTITY,
@@ -109,6 +112,9 @@ impl AppError {
     }
     pub fn forbidden(msg: impl Into<String>) -> Self {
         Self::new(ErrorCode::Forbidden, msg)
+    }
+    pub fn bad_request(msg: impl Into<String>) -> Self {
+        Self::new(ErrorCode::BadRequest, msg)
     }
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self::new(ErrorCode::NotFound, msg)

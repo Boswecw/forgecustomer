@@ -29,7 +29,7 @@ All errors share this shape:
 ```
 
 Representative codes: `UNAUTHENTICATED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`,
-`WRONG_AUDIENCE`, `FORBIDDEN`, `CUSTOMER_SUSPENDED`, `NOT_FOUND`, `CONFLICT`,
+`WRONG_AUDIENCE`, `FORBIDDEN`, `BAD_REQUEST`, `CUSTOMER_SUSPENDED`, `NOT_FOUND`, `CONFLICT`,
 `IDEMPOTENCY_REPLAY`, `VALIDATION_FAILED`, `QUOTA_EXCEEDED`, `DEVICE_LIMIT_REACHED`,
 `REVOKED`, `RATE_LIMITED`, `INTERNAL`.
 
@@ -82,3 +82,15 @@ Clients may submit only profile decoration:
 
 Customer type, status, commercial records, licenses, entitlements, and usage state are
 server-owned and cannot be set by this endpoint.
+
+## Stripe webhook receipt
+
+`POST /v1/webhooks/stripe` verifies `Stripe-Signature` with `STRIPE_WEBHOOK_SECRET`
+before parsing or writing any event. Verified events are parsed into a minimal
+non-PII summary and stored once in `stripe_webhook_events` by Stripe event id. Duplicate
+deliveries return `200` with `duplicate: true`.
+
+Supported commerce events are stored with `status = "received"` for follow-up state
+application. Unsupported events are acknowledged and stored as `ignored`. Subscription
+mutation, audit writes, and DataForge outbox emission from the received events remain the
+next Phase 5 implementation slice.

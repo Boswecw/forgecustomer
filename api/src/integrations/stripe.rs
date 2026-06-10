@@ -1,7 +1,9 @@
-//! Stripe integration. The security-critical webhook signature verification is implemented
-//! and tested here; Checkout/session creation calls are the remaining MVP wiring.
+//! Stripe integration. The security-critical webhook signature verification and minimal
+//! event-envelope parsing live here; Checkout/session creation and subscription state
+//! application are separate service/repository work.
 
 use hmac::{Hmac, Mac};
+use serde_json::{json, Value};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
@@ -17,6 +19,99 @@ pub enum WebhookError {
     NoMatch,
     #[error("webhook secret not configured")]
     NotConfigured,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum StripeEventError {
+    #[error("malformed Stripe event payload")]
+    MalformedPayload,
+    #[error("missing Stripe event id")]
+    MissingEventId,
+    #[error("missing Stripe event type")]
+    MissingEventType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StripeWebhookReceiptStatus {
+    Received,
+    Ignored,
+}
+
+impl StripeWebhookReceiptStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Received => "received",
+            Self::Ignored => "ignored",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedStripeEvent {
+    pub id: String,
+    pub event_type: String,
+    pub created: Option<i64>,
+    pub object_id: Option<String>,
+    pub object_type: Option<String>,
+    pub payload_summary: Value,
+    pub receipt_status: StripeWebhookReceiptStatus,
+}
+
+/// Events ForgeCustomer understands at receipt time. State application for these events
+/// lands in the follow-up commerce slice; unsupported events are acknowledged and ignored.
+pub fn is_supported_webhook_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "checkout.session.completed"
+            | "customer.subscription.created"
+            | "customer.subscription.updated"
+            | "customer.subscription.deleted"
+            | "invoice.paid"
+            | "invoice.payment_failed"
+    )
+}
+
+fn string_field(value: &Value, key: &str) -> Option<String> {
+    value.get(key)?.as_str().map(str::to_string)
+}
+
+/// Parse a verified Stripe event payload into a minimal, non-PII summary.
+pub fn parse_event(payload: &[u8]) -> Result<ParsedStripeEvent, StripeEventError> {
+    let value: Value =
+        serde_json::from_slice(payload).map_err(|_| StripeEventError::MalformedPayload)?;
+    let id = string_field(&value, "id").ok_or(StripeEventError::MissingEventId)?;
+    let event_type = string_field(&value, "type").ok_or(StripeEventError::MissingEventType)?;
+    let created = value.get("created").and_then(Value::as_i64);
+    let object = value
+        .get("data")
+        .and_then(|v| v.get("object"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let object_id = string_field(&object, "id");
+    let object_type = string_field(&object, "object");
+    let receipt_status = if is_supported_webhook_event(&event_type) {
+        StripeWebhookReceiptStatus::Received
+    } else {
+        StripeWebhookReceiptStatus::Ignored
+    };
+
+    let payload_summary = json!({
+        "event_id": id,
+        "event_type": event_type,
+        "created": created,
+        "object_id": object_id,
+        "object_type": object_type,
+    });
+
+    Ok(ParsedStripeEvent {
+        id,
+        event_type,
+        created,
+        object_id,
+        object_type,
+        payload_summary,
+        receipt_status,
+    })
 }
 
 /// Verify a Stripe webhook signature.
@@ -160,6 +255,42 @@ mod tests {
         assert_eq!(
             verify_signature(b"{}", "t=1,v1=ab", "", 1, 300).unwrap_err(),
             WebhookError::NotConfigured
+        );
+    }
+
+    #[test]
+    fn parses_supported_event_summary_without_customer_pii() {
+        let parsed = parse_event(
+            br#"{
+              "id":"evt_1",
+              "type":"customer.subscription.updated",
+              "created":1700000000,
+              "data":{"object":{"id":"sub_1","object":"subscription","customer":"cus_secret"}}
+            }"#,
+        )
+        .expect("event");
+
+        assert_eq!(parsed.id, "evt_1");
+        assert_eq!(parsed.event_type, "customer.subscription.updated");
+        assert_eq!(parsed.object_id.as_deref(), Some("sub_1"));
+        assert_eq!(parsed.object_type.as_deref(), Some("subscription"));
+        assert_eq!(parsed.receipt_status, StripeWebhookReceiptStatus::Received);
+        assert!(parsed.payload_summary.get("customer").is_none());
+    }
+
+    #[test]
+    fn unsupported_event_is_ignored_but_parseable() {
+        let parsed =
+            parse_event(br#"{ "id":"evt_2", "type":"payment_intent.created" }"#).expect("event");
+
+        assert_eq!(parsed.receipt_status, StripeWebhookReceiptStatus::Ignored);
+    }
+
+    #[test]
+    fn malformed_event_fails_closed() {
+        assert_eq!(
+            parse_event(br#"{ "type":"invoice.paid" }"#).unwrap_err(),
+            StripeEventError::MissingEventId
         );
     }
 }

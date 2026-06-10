@@ -23,6 +23,8 @@ Implemented today:
   headers.
 - API-owned account provisioning that maps a Supabase auth subject to one ForgeCustomer
   business customer profile idempotently.
+- Stripe webhook signature verification, minimal non-PII event parsing, and idempotent
+  webhook receipt/dedupe.
 - Public product and plan catalog endpoints backed by SQLx repositories.
 - Customer and admin JWT extraction boundaries.
 - Public entitlement key endpoint and Ed25519 signing/key-ring services.
@@ -36,7 +38,8 @@ Implemented today:
 
 Still pending before AuthorForge can rely on the service end to end:
 
-- DB-backed checkout/session and Stripe webhook handlers.
+- DB-backed checkout/session creation and subscription state application from received
+  Stripe webhook events.
 - Installation registration, activation, heartbeat, deactivation, and revocation routes.
 - Entitlement snapshot assembly from plan/grants/overrides and offline-lease issuance.
 - Usage reserve/commit/release/current endpoint wiring.

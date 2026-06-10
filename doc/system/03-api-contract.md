@@ -13,7 +13,7 @@ The HTTP API uses JSON over HTTPS with base path `/v1`. The machine-readable con
 | `GET /v1/products` | implemented | Active product catalog rows. |
 | `GET /v1/plans` | implemented | Active plan rows. |
 | `GET /v1/entitlements/keys` | implemented | Published Ed25519 verification keys. |
-| `POST /v1/webhooks/stripe` | route exists, handler pending | Stripe webhook receiver. Must verify signature before processing. |
+| `POST /v1/webhooks/stripe` | implemented receipt layer | Verifies Stripe signature, parses a minimal event envelope, stores/dedupes by Stripe event id, and explicitly ignores unsupported events. Subscription mutation remains pending. |
 
 ### Customer routes
 

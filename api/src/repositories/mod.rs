@@ -3,4 +3,5 @@
 //! transaction together with their audit + outbox writes (see services/workers).
 
 pub mod catalog;
+pub mod commerce;
 pub mod customers;

@@ -3,6 +3,10 @@
 Stripe owns payments; ForgeCustomer stores a **normalized** projection of subscription
 state. Only verified webhook processing changes subscription truth.
 
+Current implementation status: signature verification, event parsing, idempotent receipt,
+duplicate detection, and unsupported-event ignoring are live. Checkout creation and
+subscription state application from received events are the remaining Phase 5 work.
+
 ## Tables (migration `0003_commerce.sql`)
 
 `billing_accounts`, `stripe_customers`, `subscriptions`, `subscription_items`,
@@ -42,7 +46,8 @@ Stripe → POST /v1/webhooks/stripe
   → verify signature (constant-time, STRIPE_WEBHOOK_SECRET)
   → store event id in stripe_webhook_events (dedupe)
   → if duplicate: ack 200, do nothing
-  → BEGIN tx
+  → if unsupported: mark ignored, ack 200
+  → NEXT SLICE: BEGIN tx
       → normalize subscription state
       → recompute entitlements
       → write commercial_audit_event
@@ -60,6 +65,7 @@ Required events: `checkout.session.completed`, `customer.subscription.created`,
 - Browser redirect does not activate entitlements.
 - Only verified webhook processing changes subscription truth.
 - Duplicate webhooks are safe (dedupe by Stripe event id).
+- Unsupported event types are acknowledged and ignored explicitly.
 - Out-of-order events are handled (compare event/object timestamps; never regress to a
   staler state).
 - Raw card data is never stored.

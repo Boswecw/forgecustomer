@@ -66,6 +66,8 @@ Implemented today:
   headers.
 - API-owned account provisioning that maps a Supabase auth subject to one ForgeCustomer
   business customer profile idempotently.
+- Stripe webhook signature verification, minimal non-PII event parsing, and idempotent
+  webhook receipt/dedupe.
 - Public product and plan catalog endpoints backed by SQLx repositories.
 - Customer and admin JWT extraction boundaries.
 - Public entitlement key endpoint and Ed25519 signing/key-ring services.
@@ -79,7 +81,8 @@ Implemented today:
 
 Still pending before AuthorForge can rely on the service end to end:
 
-- DB-backed checkout/session and Stripe webhook handlers.
+- DB-backed checkout/session creation and subscription state application from received
+  Stripe webhook events.
 - Installation registration, activation, heartbeat, deactivation, and revocation routes.
 - Entitlement snapshot assembly from plan/grants/overrides and offline-lease issuance.
 - Usage reserve/commit/release/current endpoint wiring.
@@ -272,7 +275,7 @@ The HTTP API uses JSON over HTTPS with base path `/v1`. The machine-readable con
 | `GET /v1/products` | implemented | Active product catalog rows. |
 | `GET /v1/plans` | implemented | Active plan rows. |
 | `GET /v1/entitlements/keys` | implemented | Published Ed25519 verification keys. |
-| `POST /v1/webhooks/stripe` | route exists, handler pending | Stripe webhook receiver. Must verify signature before processing. |
+| `POST /v1/webhooks/stripe` | implemented receipt layer | Verifies Stripe signature, parses a minimal event envelope, stores/dedupes by Stripe event id, and explicitly ignores unsupported events. Subscription mutation remains pending. |
 
 ### Customer routes
 
@@ -464,9 +467,12 @@ Stripe owns payment processing. ForgeCustomer stores normalized subscription pro
 used by product clients.
 
 Current pure logic maps Stripe subscription statuses into ForgeCustomer statuses and
-determines whether a status grants cloud access. Checkout and webhook handlers are still
-pending. When implemented, only verified Stripe webhooks may change subscription truth;
-browser redirects must only confirm that the customer returned from Stripe.
+determines whether a status grants cloud access. Webhook receipt is live: the API verifies
+`Stripe-Signature`, parses a minimal non-PII event summary, stores the event id once, and
+marks unsupported events ignored. Checkout creation and subscription state application
+from received events remain pending. Only verified Stripe webhooks may change
+subscription truth; browser redirects must only confirm that the customer returned from
+Stripe.
 
 ### Licensing and installations
 
@@ -561,11 +567,14 @@ Stripe integration rules:
 - `STRIPE_WEBHOOK_SECRET` verifies webhook signatures.
 - Webhook verification uses HMAC-SHA256 and constant-time comparison.
 - Duplicate and replayed webhook events are expected and must be idempotent.
+- The webhook route stores verified event envelopes once in `stripe_webhook_events`; event
+  application into subscription state is the follow-up commerce slice.
 - Raw card data is never stored.
 - Raw webhook payload retention must be minimal and access-restricted.
 
-Checkout creation and webhook processing are route-level MVP gaps today, but the
-signature verification and normalization primitives exist.
+Checkout creation and subscription-state application are route-level MVP gaps today, but
+the signature verification, event parsing, idempotent receipt, and normalization
+primitives exist.
 
 ### DataForge outbox
 
@@ -800,6 +809,8 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
   bad-signature, and unconfigured-secret cases.
 - Bearer header parsing.
 - Account provisioning input validation and customer-auth boundary.
+- Stripe webhook signature, parsing, missing/bad signature, and malformed signed-envelope
+  rejection behavior.
 - Customer token cannot access admin route.
 - Unauthenticated admin route is rejected.
 - Valid operator token reaches pending admin handler and returns `NOT_IMPLEMENTED`.
@@ -814,7 +825,7 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 
 These are intentional MVP gaps and should not be hidden by documentation:
 
-- Checkout creation and Stripe webhook state mutation.
+- Checkout creation and received Stripe webhook state application.
 - Installation/device activation flow.
 - Entitlement snapshot assembly and offline lease issuance.
 - Usage reserve/commit/release/current route wiring.

@@ -198,10 +198,14 @@ paths:
   /v1/webhooks/stripe:
     post:
       tags: [webhooks]
-      summary: Stripe webhook receiver (signature-verified; idempotent)
+      summary: Stripe webhook receiver (signature-verified; idempotent receipt)
       security: []
       responses:
-        "200": { description: Acknowledged }
+        "200":
+          description: Acknowledged and stored or deduped
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StripeWebhookResponse" }
         "400": { description: Invalid signature }
   /v1/admin/customers:
     get:
@@ -296,6 +300,21 @@ components:
         created:
           type: boolean
           description: True when this request inserted the profile; false when it returned an existing one.
+    StripeWebhookResponse:
+      type: object
+      required: [received, duplicate, event_id, event_type, status]
+      properties:
+        received:
+          type: boolean
+          description: True when this delivery inserted a new webhook receipt.
+        duplicate:
+          type: boolean
+          description: True when this Stripe event id was already recorded.
+        event_id: { type: string, examples: ["evt_123"] }
+        event_type: { type: string, examples: ["customer.subscription.updated"] }
+        status:
+          type: string
+          enum: [received, ignored, processed, failed]
     Error:
       type: object
       required: [error]

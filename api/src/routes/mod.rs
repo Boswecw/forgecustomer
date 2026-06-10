@@ -9,6 +9,9 @@ pub mod catalog;
 pub mod entitlements;
 pub mod health;
 
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -20,8 +23,10 @@ use crate::domain::customer::{
     normalize_email_claim, validate_provision_profile, ProvisionProfileInput,
 };
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::integrations::stripe::{parse_event, verify_signature, WebhookError};
 use crate::middleware as mw;
-use crate::repositories::customers;
+use crate::repositories::commerce::StripeWebhookRecordOutcome;
+use crate::repositories::{commerce, customers};
 use crate::state::AppState;
 
 /// Assemble the full application router.
@@ -118,6 +123,26 @@ struct AccountProvisionResponse {
     created: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct StripeWebhookResponse {
+    received: bool,
+    duplicate: bool,
+    event_id: String,
+    event_type: String,
+    status: String,
+}
+
+fn stripe_webhook_error(error: WebhookError) -> AppError {
+    match error {
+        WebhookError::NotConfigured => AppError::new(
+            ErrorCode::Internal,
+            "Stripe webhook verification is not configured.",
+        ),
+        _ => AppError::bad_request("Invalid Stripe webhook signature.")
+            .with_details(json!({ "reason": error.to_string() })),
+    }
+}
+
 // --- Customer endpoints (auth enforced via CustomerContext) ----------------
 
 async fn account_get(ctx: CustomerContext) -> AppResult<Json<Value>> {
@@ -130,7 +155,7 @@ async fn account_get(ctx: CustomerContext) -> AppResult<Json<Value>> {
 
 async fn account_provision(
     auth: AuthUserContext,
-    axum::extract::State(state): axum::extract::State<AppState>,
+    State(state): State<AppState>,
     Json(request): Json<ProvisionAccountRequest>,
 ) -> AppResult<Json<AccountProvisionResponse>> {
     let validated = validate_provision_profile(ProvisionProfileInput {
@@ -241,8 +266,39 @@ async fn checkout_create(ctx: CustomerContext) -> AppResult<Json<Value>> {
 
 // --- Stripe webhook (no JWT; signature verified in the handler) ------------
 
-async fn stripe_webhook() -> AppResult<Json<Value>> {
-    Err(pending("Stripe webhook processing"))
+async fn stripe_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> AppResult<Json<StripeWebhookResponse>> {
+    let signature = headers
+        .get("stripe-signature")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| AppError::bad_request("Missing Stripe-Signature header."))?;
+
+    verify_signature(
+        &body,
+        signature,
+        &state.config.stripe_webhook_secret,
+        chrono::Utc::now().timestamp(),
+        300,
+    )
+    .map_err(stripe_webhook_error)?;
+
+    let event = parse_event(&body).map_err(|error| {
+        AppError::bad_request("Malformed Stripe event payload.")
+            .with_details(json!({ "reason": error.to_string() }))
+    })?;
+    let record = commerce::record_stripe_webhook_event(&state.pool, &event).await?;
+    let duplicate = matches!(record.outcome, StripeWebhookRecordOutcome::Duplicate);
+
+    Ok(Json(StripeWebhookResponse {
+        received: !duplicate,
+        duplicate,
+        event_id: event.id,
+        event_type: event.event_type,
+        status: record.status,
+    }))
 }
 
 // --- Admin endpoints (auth enforced via AdminContext) ----------------------

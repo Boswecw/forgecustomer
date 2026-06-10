@@ -20,11 +20,14 @@ Stripe integration rules:
 - `STRIPE_WEBHOOK_SECRET` verifies webhook signatures.
 - Webhook verification uses HMAC-SHA256 and constant-time comparison.
 - Duplicate and replayed webhook events are expected and must be idempotent.
+- The webhook route stores verified event envelopes once in `stripe_webhook_events`; event
+  application into subscription state is the follow-up commerce slice.
 - Raw card data is never stored.
 - Raw webhook payload retention must be minimal and access-restricted.
 
-Checkout creation and webhook processing are route-level MVP gaps today, but the
-signature verification and normalization primitives exist.
+Checkout creation and subscription-state application are route-level MVP gaps today, but
+the signature verification, event parsing, idempotent receipt, and normalization
+primitives exist.
 
 ### DataForge outbox
 

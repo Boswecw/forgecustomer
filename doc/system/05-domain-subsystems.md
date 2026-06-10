@@ -28,9 +28,12 @@ Stripe owns payment processing. ForgeCustomer stores normalized subscription pro
 used by product clients.
 
 Current pure logic maps Stripe subscription statuses into ForgeCustomer statuses and
-determines whether a status grants cloud access. Checkout and webhook handlers are still
-pending. When implemented, only verified Stripe webhooks may change subscription truth;
-browser redirects must only confirm that the customer returned from Stripe.
+determines whether a status grants cloud access. Webhook receipt is live: the API verifies
+`Stripe-Signature`, parses a minimal non-PII event summary, stores the event id once, and
+marks unsupported events ignored. Checkout creation and subscription state application
+from received events remain pending. Only verified Stripe webhooks may change
+subscription truth; browser redirects must only confirm that the customer returned from
+Stripe.
 
 ### Licensing and installations
 

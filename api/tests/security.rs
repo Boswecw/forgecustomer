@@ -139,6 +139,9 @@ async fn admin_mutations_require_admin_role() {
         format!("/v1/admin/customers/{id}/restore"),
         format!("/v1/admin/subscriptions/{id}/resync"),
         format!("/v1/admin/licenses/{id}/revoke"),
+        format!("/v1/admin/deletion-requests/{id}/advance"),
+        format!("/v1/admin/deletion-requests/{id}/reject"),
+        format!("/v1/admin/deletion-requests/{id}/execute"),
         "/v1/admin/licenses".to_string(),
         "/v1/admin/entitlements/override".to_string(),
         "/v1/admin/usage/adjust".to_string(),
@@ -327,6 +330,34 @@ async fn entitlement_keys_remain_public() {
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["schema"], "forge.entitlements.v1");
     assert_eq!(body["keys"][0]["alg"], "Ed25519");
+}
+
+#[tokio::test]
+async fn deletion_routes_require_customer_auth() {
+    let req = Request::builder()
+        .uri("/v1/account/deletion-request")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(status_of(req).await, StatusCode::UNAUTHORIZED);
+
+    for uri in [
+        "/v1/account/deletion-request",
+        "/v1/account/deletion-request/cancel",
+    ] {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        assert_eq!(status_of(req).await, StatusCode::UNAUTHORIZED, "{uri}");
+    }
+
+    let req = Request::builder()
+        .uri("/v1/subscriptions")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(status_of(req).await, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

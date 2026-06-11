@@ -84,6 +84,17 @@ Clients may submit only profile decoration:
 Customer type, status, commercial records, licenses, entitlements, and usage state are
 server-owned and cannot be set by this endpoint.
 
+## Subscriptions and account deletion
+
+- `GET /v1/subscriptions` — the caller's subscription projections (product/plan keys,
+  status, `grants_cloud`, period end, cancel-at-period-end).
+- `POST /v1/account/deletion-request` — opens a deletion request (idempotent while one
+  is open); `GET` reads the latest; `POST …/cancel` cancels cleanly until processing
+  begins (`409` afterwards). See `docs/PRIVACY.md` for the operator-driven workflow
+  (`/v1/admin/deletion-requests*`), the non-destructive cooling-off, the execution
+  transaction, and the retention exceptions. Anonymized accounts fail closed at the
+  auth boundary.
+
 ## Licensing: installations, devices, licenses
 
 See `docs/LICENSING.md` for the full rules. Summary of the live endpoints:

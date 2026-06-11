@@ -24,6 +24,8 @@ Current route surface:
 
 - `GET /v1/account`
 - `POST /v1/account/provision`
+- `GET|POST /v1/account/deletion-request`
+- `POST /v1/account/deletion-request/cancel`
 - `GET /v1/subscriptions`
 - `GET /v1/licenses`
 - `GET /v1/installations`
@@ -45,9 +47,17 @@ Current route surface:
 `POST /v1/account/provision` creates or returns the caller's business customer profile
 idempotently, writes the initial status-history receipt, and queues the sanitized
 `customer_created` outbox event for newly-created profiles. `GET /v1/account` returns
-the resolved customer/auth identifiers today. The only remaining `NOT_IMPLEMENTED`
-customer handler is the subscription summary (`GET /v1/subscriptions`), which still
-enforces the auth boundary.
+the resolved customer/auth identifiers; `GET /v1/subscriptions` returns the caller's
+subscription projections. Every customer handler is implemented.
+
+The deletion surface is implemented: customers open, read, and cancel their deletion
+request (`/v1/account/deletion-request*`; cancel is clean until processing); operators
+drive `requested → verified → cooling_off → processing` and execute the anonymization
+from processing (`/v1/admin/deletion-requests/*`). Execution is one transaction —
+profile PII anonymized, emails deleted, devices and licenses revoked with explicit
+records, installations deactivated, PII-free receipt written, `customer_anonymized`
+queued, `deletion_completed` audited — and refuses while a non-terminal subscription
+remains. Anonymized accounts fail closed at the auth boundary.
 
 The usage surface is implemented: advisory `check`; idempotent `reserve` under a
 per-(customer, meter, period) lock with explainable `quota_decisions` rows and
@@ -95,6 +105,10 @@ Current route surface:
 - `POST /v1/admin/entitlements/override`
 - `POST /v1/admin/usage/adjust`
 - `GET /v1/admin/audit`
+- `GET /v1/admin/deletion-requests`
+- `POST /v1/admin/deletion-requests/{id}/advance`
+- `POST /v1/admin/deletion-requests/{id}/reject`
+- `POST /v1/admin/deletion-requests/{id}/execute`
 
 The admin surface is implemented and is the Forge Command integration point. Reads
 require any valid operator token; mutations require the `admin` role and a written

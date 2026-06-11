@@ -90,6 +90,11 @@ Implemented today:
   expiry (lazy + background sweeper), reservation/direct commits on the append-only
   ledger with explainable quota decisions, releases, and per-meter current totals;
   threshold and commit-failure outbox events.
+- The account-deletion workflow: customer request/cancel, operator
+  advance/reject/execute with a non-destructive cooling-off, a one-transaction
+  anonymization (profile PII, emails, devices, licenses, installations) with a PII-free
+  receipt and the sanitized `customer_anonymized` outbox event; anonymized accounts fail
+  closed at the auth boundary. The customer subscription summary endpoint.
 - Public product and plan catalog endpoints backed by SQLx repositories.
 - Customer and admin JWT extraction boundaries.
 - Public entitlement key endpoint and Ed25519 signing/key-ring services.
@@ -101,14 +106,11 @@ Implemented today:
 - CI for Rust formatting, clippy, tests, migration determinism, RLS coverage, OpenAPI
   linting, schema parsing, secret scan, and dependency audit.
 
-Still pending before AuthorForge can rely on the service end to end:
+Every customer, webhook, and admin route is implemented; no handler returns
+`NOT_IMPLEMENTED`. Still pending before AuthorForge can rely on the service end to end:
 
-- Deletion workflow endpoints and the anonymization outbox emit.
-- The customer subscription summary endpoint (`GET /v1/subscriptions`).
-
-The router intentionally returns `NOT_IMPLEMENTED` for many protected handlers while
-still enforcing the correct auth boundary. That is a security feature of the current
-stage: unimplemented endpoints must not return partial commercial truth.
+- CI-runnable DB-backed end-to-end suites (the live local verification suites covering
+  licensing, entitlements, usage, admin, and deletion are the blueprint).
 
 ### Repository map
 
@@ -303,6 +305,8 @@ Current route surface:
 
 - `GET /v1/account`
 - `POST /v1/account/provision`
+- `GET|POST /v1/account/deletion-request`
+- `POST /v1/account/deletion-request/cancel`
 - `GET /v1/subscriptions`
 - `GET /v1/licenses`
 - `GET /v1/installations`
@@ -324,9 +328,17 @@ Current route surface:
 `POST /v1/account/provision` creates or returns the caller's business customer profile
 idempotently, writes the initial status-history receipt, and queues the sanitized
 `customer_created` outbox event for newly-created profiles. `GET /v1/account` returns
-the resolved customer/auth identifiers today. The only remaining `NOT_IMPLEMENTED`
-customer handler is the subscription summary (`GET /v1/subscriptions`), which still
-enforces the auth boundary.
+the resolved customer/auth identifiers; `GET /v1/subscriptions` returns the caller's
+subscription projections. Every customer handler is implemented.
+
+The deletion surface is implemented: customers open, read, and cancel their deletion
+request (`/v1/account/deletion-request*`; cancel is clean until processing); operators
+drive `requested → verified → cooling_off → processing` and execute the anonymization
+from processing (`/v1/admin/deletion-requests/*`). Execution is one transaction —
+profile PII anonymized, emails deleted, devices and licenses revoked with explicit
+records, installations deactivated, PII-free receipt written, `customer_anonymized`
+queued, `deletion_completed` audited — and refuses while a non-terminal subscription
+remains. Anonymized accounts fail closed at the auth boundary.
 
 The usage surface is implemented: advisory `check`; idempotent `reserve` under a
 per-(customer, meter, period) lock with explainable `quota_decisions` rows and
@@ -374,6 +386,10 @@ Current route surface:
 - `POST /v1/admin/entitlements/override`
 - `POST /v1/admin/usage/adjust`
 - `GET /v1/admin/audit`
+- `GET /v1/admin/deletion-requests`
+- `POST /v1/admin/deletion-requests/{id}/advance`
+- `POST /v1/admin/deletion-requests/{id}/reject`
+- `POST /v1/admin/deletion-requests/{id}/execute`
 
 The admin surface is implemented and is the Forge Command integration point. Reads
 require any valid operator token; mutations require the `admin` role and a written
@@ -625,9 +641,22 @@ Implemented behavior:
 ### Privacy and deletion
 
 The schema includes policy versions, consent records, and account deletion requests.
-Deletion must anonymize/delete direct PII while preserving legally required accounting
-records with explicit exceptions. Downstream deletion/anonymization events must be
-sanitized before entering the outbox.
+
+Implemented behavior:
+
+- The state machine (`requested → verified → cooling_off → processing → completed`,
+  with `rejected`/`canceled` terminals) is pure logic in `domain::deletion`; customers
+  request and cancel, operators advance, reject, and execute.
+- Cooling-off is non-destructive so a customer cancel restores nothing; the window is
+  stamped on entry and entering `processing` fails closed while it has not elapsed.
+- Execution anonymizes in one transaction — profile PII, contact emails, device labels
+  (devices revoked), licenses revoked with explicit revocation records, installations
+  deactivated, overrides deactivated — writes a PII-free receipt with the retention
+  exceptions, queues the sanitized `customer_anonymized` event, and audits
+  `deletion_completed`. It refuses while a non-terminal subscription remains.
+- Legally required accounting records (billing/invoice references, audit, usage ledger,
+  consent records) are retained per `docs/PRIVACY.md`; anonymized accounts fail closed
+  at the auth boundary.
 
 ### Admin operations
 
@@ -690,13 +719,14 @@ Outbox behavior:
 - Retry uses deterministic backoff and eventually dead-letters exhausted events.
 - Delivery keys must make repeated publishes idempotent downstream.
 
-Live emit sites: `customer_created` (provisioning), `subscription_changed` (webhook
-processing and admin resync, when the projection changed), `installation_registered`
-(first registration), `license_activated` (successful activation), `license_revoked`
-(admin revocation), `customer_suspended` / `customer_restored` (admin status changes),
-`quota_threshold_reached` (usage commits crossing configured thresholds, once per
-customer/meter/period/threshold), and `usage_commit_failed` (denied direct commits).
-The only contract event not yet emitted is `customer_anonymized` (deletion workflow).
+Every event in the contract has a live emit site: `customer_created` (provisioning),
+`subscription_changed` (webhook processing and admin resync, when the projection
+changed), `installation_registered` (first registration), `license_activated`
+(successful activation), `license_revoked` (admin revocation), `customer_suspended` /
+`customer_restored` (admin status changes), `quota_threshold_reached` (usage commits
+crossing configured thresholds, once per customer/meter/period/threshold),
+`usage_commit_failed` (denied direct commits), and `customer_anonymized` (deletion
+execution, keyed by request id).
 
 ### Event payload hygiene
 
@@ -938,6 +968,9 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
   threshold-crossing detection (fires exactly on crossing, never re-fires, never for
   unlimited/zero limits).
 - All five usage routes fail closed without auth.
+- Deletion state machine: linear forward path, cancel/reject stop at processing,
+  execution only from processing; deletion and subscription routes fail closed without
+  auth and the admin deletion mutations are role-gated.
 - Stripe webhook signature, parsing, missing/bad signature, and malformed signed-envelope
   rejection behavior.
 - Customer token cannot access admin route.
@@ -956,11 +989,9 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 
 These are intentional MVP gaps and should not be hidden by documentation:
 
-- Deletion workflow endpoints and the anonymization outbox emit.
-- The customer subscription summary endpoint (`GET /v1/subscriptions`).
-- End-to-end suites with live or mocked Stripe/Supabase/DataForge flows in CI (including
-  DB-backed proofs for device-limit, revocation, snapshot, lease, admin, and usage
-  paths).
+- End-to-end suites with live or mocked Stripe/Supabase/DataForge flows in CI. The live
+  local verification suites (174 checks across licensing, entitlements, usage, admin,
+  and deletion against PostgreSQL 16 with a mocked Stripe API) are the blueprint.
 
 ### Release standard
 

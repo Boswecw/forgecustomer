@@ -4,6 +4,7 @@
 pub mod admin;
 pub mod checkout;
 pub mod customer;
+pub mod deletion;
 pub mod entitlement;
 pub mod installation;
 pub mod lease;

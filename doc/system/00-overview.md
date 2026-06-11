@@ -47,6 +47,11 @@ Implemented today:
   expiry (lazy + background sweeper), reservation/direct commits on the append-only
   ledger with explainable quota decisions, releases, and per-meter current totals;
   threshold and commit-failure outbox events.
+- The account-deletion workflow: customer request/cancel, operator
+  advance/reject/execute with a non-destructive cooling-off, a one-transaction
+  anonymization (profile PII, emails, devices, licenses, installations) with a PII-free
+  receipt and the sanitized `customer_anonymized` outbox event; anonymized accounts fail
+  closed at the auth boundary. The customer subscription summary endpoint.
 - Public product and plan catalog endpoints backed by SQLx repositories.
 - Customer and admin JWT extraction boundaries.
 - Public entitlement key endpoint and Ed25519 signing/key-ring services.
@@ -58,14 +63,11 @@ Implemented today:
 - CI for Rust formatting, clippy, tests, migration determinism, RLS coverage, OpenAPI
   linting, schema parsing, secret scan, and dependency audit.
 
-Still pending before AuthorForge can rely on the service end to end:
+Every customer, webhook, and admin route is implemented; no handler returns
+`NOT_IMPLEMENTED`. Still pending before AuthorForge can rely on the service end to end:
 
-- Deletion workflow endpoints and the anonymization outbox emit.
-- The customer subscription summary endpoint (`GET /v1/subscriptions`).
-
-The router intentionally returns `NOT_IMPLEMENTED` for many protected handlers while
-still enforcing the correct auth boundary. That is a security feature of the current
-stage: unimplemented endpoints must not return partial commercial truth.
+- CI-runnable DB-backed end-to-end suites (the live local verification suites covering
+  licensing, entitlements, usage, admin, and deletion are the blueprint).
 
 ### Repository map
 

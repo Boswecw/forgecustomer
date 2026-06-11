@@ -36,6 +36,8 @@ pub struct Config {
 
     pub snapshot_ttl: Duration,
     pub offline_grace: Duration,
+    /// How long a deletion request rests in cooling-off before it may be processed.
+    pub deletion_cooling_off: Duration,
     /// How long a usage reservation holds quota before it auto-expires.
     pub usage_reservation_ttl: Duration,
     /// Usage thresholds (percent of limit) that emit `quota_threshold_reached`.
@@ -128,6 +130,9 @@ impl Config {
             dataforge_service_token: optional("DATAFORGE_SERVICE_TOKEN", ""),
             snapshot_ttl: Duration::from_secs(snapshot_ttl_hours * 3600),
             offline_grace: Duration::from_secs(offline_grace_days * 86400),
+            deletion_cooling_off: Duration::from_secs(
+                parse_u64("DELETION_COOLING_OFF_DAYS", 14)? * 86400,
+            ),
             usage_reservation_ttl: Duration::from_secs(parse_u64(
                 "USAGE_RESERVATION_TTL_SECS",
                 900,

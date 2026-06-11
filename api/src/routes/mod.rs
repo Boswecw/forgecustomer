@@ -2,9 +2,8 @@
 //! admin routes resolve an [`AdminContext`] validated against the separate operator issuer
 //! (Forge Command), with mutations additionally gated on the `admin` operator role.
 //!
-//! The only handler still returning `NOT_IMPLEMENTED` is the subscription summary
-//! (`GET /v1/subscriptions`); it still enforces the correct auth boundary, so the
-//! security contract is testable today.
+//! Every route is fully implemented; auth boundaries (customer vs operator, role-gated
+//! mutations) are enforced ahead of all data access.
 
 pub mod catalog;
 pub mod entitlements;
@@ -42,7 +41,7 @@ use crate::middleware as mw;
 use crate::repositories::commerce::{StripeWebhookApplyError, StripeWebhookRecordOutcome};
 use crate::repositories::licensing::{self, ActivationError, RegistrationError};
 use crate::repositories::usage as usage_repo;
-use crate::repositories::{admin, commerce, customers};
+use crate::repositories::{admin, commerce, customers, privacy};
 use crate::state::AppState;
 
 /// Assemble the full application router.
@@ -58,6 +57,14 @@ pub fn build_router(state: AppState) -> Router {
     let customer = Router::new()
         .route("/v1/account", get(account_get))
         .route("/v1/account/provision", post(account_provision))
+        .route(
+            "/v1/account/deletion-request",
+            get(deletion_request_get).post(deletion_request_create),
+        )
+        .route(
+            "/v1/account/deletion-request/cancel",
+            post(deletion_request_cancel),
+        )
         .route("/v1/subscriptions", get(subscriptions_get))
         .route("/v1/licenses", get(licenses_get))
         .route(
@@ -101,7 +108,20 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/admin/licenses/:id/revoke", post(admin_revoke_license))
         .route("/v1/admin/entitlements/override", post(admin_override))
         .route("/v1/admin/usage/adjust", post(admin_usage_adjust))
-        .route("/v1/admin/audit", get(admin_audit));
+        .route("/v1/admin/audit", get(admin_audit))
+        .route("/v1/admin/deletion-requests", get(admin_deletion_list))
+        .route(
+            "/v1/admin/deletion-requests/:id/advance",
+            post(admin_deletion_advance),
+        )
+        .route(
+            "/v1/admin/deletion-requests/:id/reject",
+            post(admin_deletion_reject),
+        )
+        .route(
+            "/v1/admin/deletion-requests/:id/execute",
+            post(admin_deletion_execute),
+        );
 
     public
         .merge(customer)
@@ -110,14 +130,6 @@ pub fn build_router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(mw::security_headers))
         .layer(axum::middleware::from_fn(mw::correlation_id))
         .with_state(state)
-}
-
-/// Placeholder response for endpoints whose DB-backed behavior is pending MVP wiring.
-fn pending(what: &str) -> AppError {
-    AppError::new(
-        ErrorCode::NotImplemented,
-        format!("{what} is not yet implemented."),
-    )
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -364,9 +376,90 @@ async fn account_provision(
     }))
 }
 
-async fn subscriptions_get(ctx: CustomerContext) -> AppResult<Json<Value>> {
-    ctx.require_active()?;
-    Err(pending("Subscription summary"))
+async fn subscriptions_get(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+) -> AppResult<Json<Value>> {
+    let customer_id = ctx.require_active()?;
+    let subscriptions = commerce::list_customer_subscriptions(&state.pool, customer_id).await?;
+    Ok(Json(json!({ "subscriptions": subscriptions })))
+}
+
+// --- Account deletion (customer side) ---------------------------------------
+
+fn deletion_error(error: privacy::DeletionError) -> AppError {
+    match error {
+        privacy::DeletionError::NotFound => AppError::not_found("Deletion request not found."),
+        privacy::DeletionError::InvalidState(status) => AppError::new(
+            ErrorCode::Conflict,
+            "The deletion request is not in a state that allows this transition.",
+        )
+        .with_details(json!({ "request_status": status })),
+        privacy::DeletionError::CoolingOffActive => AppError::new(
+            ErrorCode::Conflict,
+            "The cooling-off period has not elapsed yet.",
+        ),
+        privacy::DeletionError::SubscriptionStillActive => AppError::new(
+            ErrorCode::Conflict,
+            "Cancel the customer's subscriptions at Stripe (and resync) before executing deletion.",
+        ),
+        privacy::DeletionError::Db(error) => error.into(),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DeletionRequestCreate {
+    reason: Option<String>,
+}
+
+async fn deletion_request_create(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    Json(request): Json<DeletionRequestCreate>,
+) -> AppResult<Json<Value>> {
+    let customer_id = ctx.require_active()?;
+    let reason = match request.reason.as_deref().map(str::trim) {
+        Some(value) if !value.is_empty() => {
+            Some(clean_reason(value).map_err(admin_validation_error)?)
+        }
+        _ => None,
+    };
+
+    let requested = privacy::request_deletion(
+        &state.pool,
+        customer_id,
+        reason.as_deref(),
+        correlation_id(&correlation),
+    )
+    .await?;
+    Ok(Json(json!({
+        "request": requested.request,
+        "created": requested.created,
+    })))
+}
+
+async fn deletion_request_get(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+) -> AppResult<Json<Value>> {
+    let customer_id = ctx.require_active()?;
+    let request = privacy::latest_request(&state.pool, customer_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("No deletion request exists."))?;
+    Ok(Json(json!({ "request": request })))
+}
+
+async fn deletion_request_cancel(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+) -> AppResult<Json<Value>> {
+    let customer_id = ctx.require_active()?;
+    let request = privacy::cancel_request(&state.pool, customer_id, correlation_id(&correlation))
+        .await
+        .map_err(deletion_error)?;
+    Ok(Json(json!({ "request": request })))
 }
 
 async fn licenses_get(
@@ -1363,6 +1456,114 @@ async fn admin_usage_adjust(
         "amount": outcome.amount,
         "replayed": outcome.replayed,
     })))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AdminDeletionListQuery {
+    status: Option<String>,
+    limit: Option<i64>,
+}
+
+async fn admin_deletion_list(
+    _admin: AdminContext,
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<AdminDeletionListQuery>,
+) -> AppResult<Json<Value>> {
+    let status = match query.status.as_deref().map(str::trim) {
+        Some(value) if !value.is_empty() => {
+            if !matches!(
+                value,
+                "requested"
+                    | "verified"
+                    | "cooling_off"
+                    | "processing"
+                    | "completed"
+                    | "rejected"
+                    | "canceled"
+            ) {
+                return Err(AppError::validation("unknown deletion request status")
+                    .with_details(json!({ "field": "status" })));
+            }
+            Some(value)
+        }
+        _ => None,
+    };
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+
+    let requests = privacy::list_requests(&state.pool, status, limit).await?;
+    Ok(Json(json!({ "requests": requests })))
+}
+
+async fn admin_deletion_advance(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    Path(id): Path<String>,
+    Json(request): Json<AdminReasonRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    let request_id = parse_path_id(&id)?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+    let cooling_off = chrono::Duration::from_std(state.config.deletion_cooling_off)
+        .map_err(|_| AppError::internal("Invalid cooling-off configuration."))?;
+
+    let updated = privacy::advance_request(
+        &state.pool,
+        &operator.operator_id,
+        request_id,
+        cooling_off,
+        &reason,
+        correlation_id(&correlation),
+    )
+    .await
+    .map_err(deletion_error)?;
+    Ok(Json(json!({ "request": updated })))
+}
+
+async fn admin_deletion_reject(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    Path(id): Path<String>,
+    Json(request): Json<AdminReasonRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    let request_id = parse_path_id(&id)?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+
+    let updated = privacy::reject_request(
+        &state.pool,
+        &operator.operator_id,
+        request_id,
+        &reason,
+        correlation_id(&correlation),
+    )
+    .await
+    .map_err(deletion_error)?;
+    Ok(Json(json!({ "request": updated })))
+}
+
+async fn admin_deletion_execute(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    Path(id): Path<String>,
+    Json(request): Json<AdminReasonRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    let request_id = parse_path_id(&id)?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+
+    let updated = privacy::execute_deletion(
+        &state.pool,
+        &operator.operator_id,
+        request_id,
+        &reason,
+        correlation_id(&correlation),
+    )
+    .await
+    .map_err(deletion_error)?;
+    Ok(Json(json!({ "request": updated })))
 }
 
 #[derive(Debug, Default, Deserialize)]

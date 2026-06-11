@@ -91,7 +91,40 @@ paths:
       tags: [subscriptions]
       summary: Own subscription summary
       responses:
+        "200": { description: "Subscriptions with product/plan keys, status, grants_cloud, period end" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/account/deletion-request:
+    get:
+      tags: [account]
+      summary: Read the caller's latest deletion request
+      responses:
+        "200": { description: Latest deletion request (any state) }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: No deletion request exists }
+    post:
+      tags: [account]
+      summary: Request account deletion (idempotent while a request is open)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                reason: { type: ["string", "null"], maxLength: 500 }
+      responses:
+        "200": { description: "Open (or existing) request + created flag" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/account/deletion-request/cancel:
+    post:
+      tags: [account]
+      summary: Cancel the open deletion request (clean until processing begins)
+      responses:
+        "200": { description: Canceled request }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: No open deletion request }
+        "409": { description: Request already processing/terminal }
   /v1/licenses:
     get:
       tags: [licensing]
@@ -658,6 +691,83 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { description: Customer or meter not found }
         "422": { description: Validation failed }
+  /v1/admin/deletion-requests:
+    get:
+      tags: [admin]
+      summary: List deletion requests (operator read)
+      security: [{ adminAuth: [] }]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [requested, verified, cooling_off, processing, completed, rejected, canceled]
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 50, maximum: 200 } }
+      responses:
+        "200": { description: "Deletion requests, newest first" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/admin/deletion-requests/{id}/advance:
+    post:
+      tags: [admin]
+      summary: Advance the deletion workflow one step (requires `admin` role)
+      description: >
+        requested → verified → cooling_off → processing. Entering cooling_off stamps the
+        configured window; entering processing requires the window to have elapsed.
+        Execution from processing happens via the execute endpoint.
+      security: [{ adminAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminReasonRequest" }
+      responses:
+        "200": { description: Updated request }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Request not found }
+        "409": { description: "Invalid state, or cooling-off has not elapsed" }
+  /v1/admin/deletion-requests/{id}/reject:
+    post:
+      tags: [admin]
+      summary: Reject a not-yet-processing deletion request (requires `admin` role)
+      security: [{ adminAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminReasonRequest" }
+      responses:
+        "200": { description: Rejected request }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Request not found }
+        "409": { description: Request already processing/terminal }
+  /v1/admin/deletion-requests/{id}/execute:
+    post:
+      tags: [admin]
+      summary: Execute the deletion (anonymize) from processing (requires `admin` role)
+      description: >
+        Point of no return. Anonymizes profile PII, deletes contact emails, revokes
+        devices and licenses (explicit revocation records), deactivates installations,
+        writes the PII-free deletion receipt, queues the sanitized customer_anonymized
+        outbox event, and audits deletion_completed — in one transaction. Refused while
+        any non-terminal subscription remains (cancel at Stripe and resync first).
+      security: [{ adminAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminReasonRequest" }
+      responses:
+        "200": { description: Completed request with deletion receipt }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Request not found }
+        "409": { description: "Not in processing, or a subscription is still open" }
   /v1/admin/audit:
     get:
       tags: [admin]

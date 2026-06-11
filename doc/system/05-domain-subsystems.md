@@ -132,9 +132,22 @@ Implemented behavior:
 ### Privacy and deletion
 
 The schema includes policy versions, consent records, and account deletion requests.
-Deletion must anonymize/delete direct PII while preserving legally required accounting
-records with explicit exceptions. Downstream deletion/anonymization events must be
-sanitized before entering the outbox.
+
+Implemented behavior:
+
+- The state machine (`requested → verified → cooling_off → processing → completed`,
+  with `rejected`/`canceled` terminals) is pure logic in `domain::deletion`; customers
+  request and cancel, operators advance, reject, and execute.
+- Cooling-off is non-destructive so a customer cancel restores nothing; the window is
+  stamped on entry and entering `processing` fails closed while it has not elapsed.
+- Execution anonymizes in one transaction — profile PII, contact emails, device labels
+  (devices revoked), licenses revoked with explicit revocation records, installations
+  deactivated, overrides deactivated — writes a PII-free receipt with the retention
+  exceptions, queues the sanitized `customer_anonymized` event, and audits
+  `deletion_completed`. It refuses while a non-terminal subscription remains.
+- Legally required accounting records (billing/invoice references, audit, usage ledger,
+  consent records) are retained per `docs/PRIVACY.md`; anonymized accounts fail closed
+  at the auth boundary.
 
 ### Admin operations
 

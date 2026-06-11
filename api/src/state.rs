@@ -7,6 +7,7 @@ use sqlx::PgPool;
 
 use crate::auth::JwtValidator;
 use crate::config::Config;
+use crate::middleware::rate_limit::RateLimiter;
 use crate::services::signing::{Signer25519, VerifyingKeyRing};
 
 #[derive(Clone)]
@@ -18,6 +19,7 @@ pub struct AppState {
     pub customer_validator: JwtValidator,
     pub admin_validator: JwtValidator,
     pub http: reqwest::Client,
+    pub rate_limiter: Arc<RateLimiter>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -70,6 +72,7 @@ impl AppState {
             customer_validator,
             admin_validator,
             http,
+            rate_limiter: Arc::new(RateLimiter::default()),
         })
     }
 }

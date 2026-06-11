@@ -46,6 +46,8 @@ pub struct Config {
 
     pub request_timeout: Duration,
     pub max_body_bytes: usize,
+    /// Per-client request budget per minute (`0` disables rate limiting).
+    pub rate_limit_per_minute: u32,
 }
 
 /// Configuration errors. Missing required variables fail closed at startup.
@@ -141,6 +143,10 @@ impl Config {
             usage_threshold_percents: parse_percent_list("USAGE_THRESHOLD_PERCENTS", &[80, 100])?,
             request_timeout: Duration::from_secs(parse_u64("REQUEST_TIMEOUT_SECS", 30)?),
             max_body_bytes: parse_u64("MAX_BODY_BYTES", 1024 * 1024)? as usize,
+            rate_limit_per_minute: u32::try_from(parse_u64("RATE_LIMIT_PER_MINUTE", 300)?)
+                .map_err(|_| {
+                    ConfigError::Invalid("RATE_LIMIT_PER_MINUTE", "value too large".to_string())
+                })?,
         })
     }
 }

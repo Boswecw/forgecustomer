@@ -164,15 +164,18 @@ INTERNAL
 Database errors are logged server-side and mapped to `INTERNAL` without leaking database
 details to the client.
 
-Two router-level guards respond before handlers run and return plain (non-enveloped)
-responses: bodies over `MAX_BODY_BYTES` are rejected `413`, and requests exceeding
-`REQUEST_TIMEOUT_SECS` return `503`. Both still carry the correlation and security
-headers.
+Router-level guards respond before handlers run. Clients exceeding their per-minute
+budget get `429 RATE_LIMITED` through the standard envelope with a `retry-after` header.
+Two guards return plain (non-enveloped) responses: bodies over `MAX_BODY_BYTES` are
+rejected `413`, and requests exceeding `REQUEST_TIMEOUT_SECS` return `503`. All guard
+responses still carry the correlation and security headers.
 
 ### Idempotency and correlation
 
 - Every response includes `x-correlation-id`.
-- Clients may provide `x-correlation-id`; otherwise the service generates `corr_<uuid>`.
+- Clients may provide `x-correlation-id` (up to 128 chars of `[A-Za-z0-9._-]`, since the
+  value lands in audit rows and logs); anything else — or no header — yields a generated
+  `corr_<uuid>`.
 - Mutating endpoints that can be retried should accept `Idempotency-Key`.
 - Usage, installation, Stripe webhook, and outbox delivery paths must treat replay as
   expected behavior, not as an exceptional production incident.

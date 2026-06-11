@@ -47,7 +47,13 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(%addr, env = %app_env, "ForgeCustomer API starting");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // ConnectInfo gives the rate limiter the socket peer when no trusted proxy header
+    // is present (local/dev).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

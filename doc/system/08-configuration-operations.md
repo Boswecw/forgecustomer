@@ -27,6 +27,7 @@ required variables fail startup. Empty token-verification secrets fail token val
 | `OFFLINE_GRACE_DAYS` | no | `14` | Offline grace window. |
 | `REQUEST_TIMEOUT_SECS` | no | `30` | Per-request deadline enforced by the router; expiry returns `503`. |
 | `MAX_BODY_BYTES` | no | `1048576` | Request body cap enforced by the router; oversized bodies return `413`. |
+| `RATE_LIMIT_PER_MINUTE` | no | `300` | Per-client (per-IP) request budget per minute; exceeding it returns `429 RATE_LIMITED` with `retry-after`. `0` disables. |
 
 `.env.example` is a template only. Real values must come from a secret manager or the
 deployment environment.

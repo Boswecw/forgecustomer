@@ -50,10 +50,13 @@ available. `/v1/ready` is the deploy/load-balancer gate because it executes `sel
 
 1. `correlation_id` middleware propagates or creates `x-correlation-id`.
 2. `security_headers` middleware adds conservative response headers.
-3. Router-level guards bound every request: bodies over `MAX_BODY_BYTES` are rejected
-   `413`, and handling that exceeds `REQUEST_TIMEOUT_SECS` returns `503` (retriable —
-   Stripe re-delivers webhooks and processing is idempotent). Both responses still carry
-   the correlation and security headers.
+3. Router-level guards bound every request: clients over their `RATE_LIMIT_PER_MINUTE`
+   budget get `429 RATE_LIMITED` (error contract + `retry-after`; keyed by the
+   proxy-appended rightmost `x-forwarded-for` entry, falling back to the socket peer),
+   bodies over `MAX_BODY_BYTES` are rejected `413`, and handling that exceeds
+   `REQUEST_TIMEOUT_SECS` returns `503` (retriable — Stripe re-delivers webhooks and
+   processing is idempotent). Guard responses still carry the correlation and security
+   headers.
 4. Customer/admin extractors parse `Authorization: Bearer <jwt>`.
 5. The matching JWT validator checks signature, issuer, audience, and expiry.
 6. New customers call `POST /v1/account/provision`; this validates the Supabase JWT and

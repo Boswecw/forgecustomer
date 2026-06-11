@@ -8,6 +8,22 @@
 4. Build & run the API: `cd api && cargo build --release && ./target/release/forgecustomer-api`.
 5. Verify: `GET /v1/health` → ok, `GET /v1/ready` → 200, `GET /v1/version`.
 
+### Render (Docker)
+
+- The image builds from `deploy/Dockerfile` with the repo root as build context; there
+  is intentionally **no root `Dockerfile`**. `render.yaml` (Blueprint) encodes this.
+  For a manually created service, set **Settings → Build & Deploy → Dockerfile Path**
+  to `deploy/Dockerfile` (Docker build context stays `.`), or the build fails with
+  `failed to read dockerfile: open Dockerfile: no such file or directory`.
+- The app binds `0.0.0.0:$PORT`; the Blueprint pins `PORT=8080` to match the image's
+  `EXPOSE`. Health check path is `/v1/ready` so rollouts gate on DB reachability.
+- Postgres is the Supabase project, not a Render database: point `DATABASE_URL` at
+  Supabase's pooled connection string. Migrations still ship via `supabase db push`
+  (step 2) — the API container never applies migrations.
+- All secrets are entered in the Render dashboard (`sync: false` in the Blueprint);
+  they are never committed. Use an always-on plan: free instances idle out and stall
+  the outbox publisher and reservation sweeper.
+
 ## Health & readiness
 
 - `health` = process up. `ready` = DB reachable. Load balancers should gate on `ready`.

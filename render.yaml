@@ -1,0 +1,70 @@
+# Render Blueprint for the ForgeCustomer API.
+#
+# The Dockerfile intentionally lives at deploy/Dockerfile, not the repo root, so
+# Render must be pointed at it: either deploy via this Blueprint, or — for a
+# manually created service — set Settings → Build & Deploy → Dockerfile Path to
+# `deploy/Dockerfile`. See docs/RUNBOOK.md → Deploy → Render.
+#
+# Secrets are NEVER committed here. Every `sync: false` entry is prompted for in
+# the Render dashboard and stored there (CLAUDE.md hard rule 2).
+
+services:
+  - type: web
+    name: forgecustomer-api
+    runtime: docker
+    # Free instances spin down on idle, which would stall the outbox publisher
+    # and reservation sweeper. Use an always-on plan.
+    plan: starter
+    dockerfilePath: ./deploy/Dockerfile
+    dockerContext: .
+    # Gate rollout/traffic on DB reachability, not just process liveness
+    # (docs/RUNBOOK.md: "Load balancers should gate on ready").
+    healthCheckPath: /v1/ready
+    envVars:
+      # The app binds $HOST:$PORT (default 0.0.0.0). 8080 matches the image's EXPOSE.
+      - key: PORT
+        value: "8080"
+      - key: APP_ENV
+        value: production
+      - key: RUST_LOG
+        value: info
+
+      # --- Required at startup; the service fails closed without them ---
+      # Supabase Postgres connection string (use the pooled connection string).
+      - key: DATABASE_URL
+        sync: false
+      # e.g. https://<project>.supabase.co/auth/v1
+      - key: SUPABASE_JWT_ISSUER
+        sync: false
+      # Supabase project JWT secret (HS256). Empty = customer auth fails closed.
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      # Forge Command Token Authority issuer (e.g. forge_command_local).
+      - key: ADMIN_JWT_ISSUER
+        sync: false
+      # FC's SPKI public-key PEM. Empty = admin surface fails closed.
+      - key: ADMIN_JWT_PUBLIC_KEY
+        sync: false
+      # Base64-encoded 32-byte Ed25519 seed.
+      - key: ENTITLEMENT_SIGNING_PRIVATE_KEY
+        sync: false
+
+      # --- Stripe (required for live commerce) ---
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+
+      # --- DataForge outbox (optional; leave blank to disable the publisher) ---
+      - key: DATAFORGE_API_URL
+        sync: false
+      - key: DATAFORGE_SERVICE_TOKEN
+        sync: false
+
+      # --- Stable defaults ---
+      - key: SUPABASE_JWT_AUDIENCE
+        value: authenticated
+      - key: ADMIN_JWT_AUDIENCE
+        value: forgecustomer-admin
+      - key: ENTITLEMENT_SIGNING_KEY_ID
+        value: entitlement-key-1

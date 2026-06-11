@@ -1,0 +1,17 @@
+# Keep the Docker build context lean: deploy/Dockerfile only copies
+# Cargo.toml, Cargo.lock, and api/ into the build stage.
+.git
+.github
+**/target
+doc/
+docs/
+supabase/
+tests/
+contracts/
+
+# Never let environment files near an image build.
+.env
+.env.*
+!.env.example
+*.pem
+*.key

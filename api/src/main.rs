@@ -33,6 +33,12 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Reservation expiry sweeper: reclaims quota held by abandoned reservations.
+    let sweeper_state = state.clone();
+    tokio::spawn(async move {
+        workers::usage::run(sweeper_state, Duration::from_secs(30)).await;
+    });
+
     let app = routes::build_router(state);
 
     let addr: SocketAddr = format!("{host}:{port}")

@@ -84,6 +84,17 @@ Clients may submit only profile decoration:
 Customer type, status, commercial records, licenses, entitlements, and usage state are
 server-owned and cannot be set by this endpoint.
 
+## Subscriptions and account deletion
+
+- `GET /v1/subscriptions` — the caller's subscription projections (product/plan keys,
+  status, `grants_cloud`, period end, cancel-at-period-end).
+- `POST /v1/account/deletion-request` — opens a deletion request (idempotent while one
+  is open); `GET` reads the latest; `POST …/cancel` cancels cleanly until processing
+  begins (`409` afterwards). See `docs/PRIVACY.md` for the operator-driven workflow
+  (`/v1/admin/deletion-requests*`), the non-destructive cooling-off, the execution
+  transaction, and the retention exceptions. Anonymized accounts fail closed at the
+  auth boundary.
+
 ## Licensing: installations, devices, licenses
 
 See `docs/LICENSING.md` for the full rules. Summary of the live endpoints:
@@ -164,6 +175,27 @@ The response returns the Stripe-hosted checkout URL and records
 `stripe_checkout_session_id` in `checkout_sessions` with status `created`. This does
 **not** activate entitlements; verified Stripe webhooks remain the only path that changes
 subscription truth.
+
+## Usage: check, reserve, commit, release, current
+
+See `docs/USAGE.md` for the full rules. Summary of the live endpoints:
+
+- `POST /v1/usage/check` — advisory, read-only quota check for one meter.
+- `POST /v1/usage/reserve` — holds units against the quota (requires `Idempotency-Key`;
+  replays return the original reservation). Quota math runs under a per-(customer,
+  meter, period) lock; over-quota requests answer `402 QUOTA_EXCEEDED` with the
+  explainable decision in the details, and every decision lands in `quota_decisions`.
+  Reservations expire after `USAGE_RESERVATION_TTL_SECS` (lazily and via a background
+  sweeper), freeing their hold.
+- `POST /v1/usage/commit` — appends to the append-only `usage_events` ledger (requires
+  `Idempotency-Key`; replays do not double-charge). Either converts a pending
+  reservation (charging the reservation's period; expired/terminal reservations `409`)
+  or directly charges `meter_key`+`amount`, quota-gated at commit time. Threshold
+  crossings queue `quota_threshold_reached` outbox events; denied direct commits queue
+  `usage_commit_failed`.
+- `POST /v1/usage/release` — releases an unused reservation, idempotently.
+- `GET /v1/usage/current` — per-meter current-period totals with limits and remaining
+  quota from the assembled entitlements.
 
 ## Admin API (Forge Command)
 

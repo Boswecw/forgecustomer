@@ -8,3 +8,5 @@ pub mod commerce;
 pub mod customers;
 pub mod entitlements;
 pub mod licensing;
+pub mod privacy;
+pub mod usage;

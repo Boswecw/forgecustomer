@@ -66,7 +66,8 @@ impl FromRequestParts<AppState> for CustomerContext {
 }
 
 impl CustomerContext {
-    /// Require a fully provisioned, non-suspended customer for privileged product actions.
+    /// Require a fully provisioned, non-suspended, non-terminated customer for
+    /// privileged product actions. Anonymized/closed accounts fail closed.
     pub fn require_active(&self) -> Result<Uuid, AppError> {
         let id = self.customer_id.ok_or_else(|| {
             AppError::new(ErrorCode::Forbidden, "No customer profile is provisioned.")
@@ -75,6 +76,12 @@ impl CustomerContext {
             return Err(AppError::new(
                 ErrorCode::CustomerSuspended,
                 "This customer account is suspended.",
+            ));
+        }
+        if matches!(self.status.as_deref(), Some("anonymized") | Some("closed")) {
+            return Err(AppError::new(
+                ErrorCode::Forbidden,
+                "This customer account is closed.",
             ));
         }
         Ok(id)

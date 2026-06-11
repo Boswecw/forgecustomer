@@ -6,8 +6,8 @@ ForgeCustomer's test strategy spans three layers.
 
 | Suite | Location | What it covers |
 | ----- | -------- | -------------- |
-| Unit (domain/services/integrations) | `api/src/**/tests` (`cargo test`) | customer provisioning validation, checkout request validation, installation registration validation (install key, Ed25519 device key + fingerprint, app version, label), admin input validation (reason/device-limit/adjustment/period/override-value bounds), Stripe Checkout form construction, subscription normalization, license-sync transitions (issue/suspend/expire/reactivate; revoked never auto-lifts), entitlement precedence + check-key validation, signed-snapshot sign/verify + key rotation, signed-lease canonical bytes + sign/verify/tamper, quota decisions, device-limit & offline-lease rules, outbox redaction, Stripe webhook signature verification (valid/tampered/wrong-secret/replay/malformed), Stripe event envelope parsing/extraction, outbox backoff |
-| Security integration | `api/tests/security.rs` | unauthenticated routes fail closed (including all licensing + entitlement routes and parameterized installation/admin routes); entitlement keys stay public; **customer token cannot access admin route**; valid operator token clears admin auth in front of data access; **admin mutations require the `admin` role** (support role 403s on every mutation, reads pass); admin reason validation rejects before DB writes; usage adjustments require an idempotency key; account provisioning auth/input boundary; Stripe webhook fail-closed boundary; error contract shape |
+| Unit (domain/services/integrations) | `api/src/**/tests` (`cargo test`) | customer provisioning validation, checkout request validation, installation registration validation (install key, Ed25519 device key + fingerprint, app version, label), admin input validation (reason/device-limit/adjustment/period/override-value bounds), usage rules (amount bounds, cadence period keys, quota-key candidates, threshold-crossing detection), deletion state machine (linear forward path; cancel/reject/execute gates), Stripe Checkout form construction, subscription normalization, license-sync transitions (issue/suspend/expire/reactivate; revoked never auto-lifts), entitlement precedence + check-key validation, signed-snapshot sign/verify + key rotation, signed-lease canonical bytes + sign/verify/tamper, quota decisions, device-limit & offline-lease rules, outbox redaction, Stripe webhook signature verification (valid/tampered/wrong-secret/replay/malformed), Stripe event envelope parsing/extraction, outbox backoff |
+| Security integration | `api/tests/security.rs` | unauthenticated routes fail closed (including all licensing, entitlement, usage, deletion, and subscription routes and parameterized installation/admin routes); entitlement keys stay public; **customer token cannot access admin route**; valid operator token clears admin auth in front of data access; **admin mutations require the `admin` role** (support role 403s on every mutation incl. deletion advance/reject/execute, reads pass); admin reason validation rejects before DB writes; usage adjustments require an idempotency key; account provisioning auth/input boundary; Stripe webhook fail-closed boundary; error contract shape |
 | Migration + RLS | `.github/workflows/ci.yml` (`migrations` job) | clean apply, **deterministic reruns**, idempotent seed, **RLS enabled on every table**, append-only ledger rejects UPDATE |
 
 Run locally:
@@ -32,9 +32,9 @@ From the plan — ✅ covered today, 🔜 pending DB-backed flow wiring:
 - 🔜 Customer cannot create license / grant entitlement / alter usage total (RLS denies;
   licenses are only written by webhook-driven sync server-side; end-to-end test pending)
 - ✅ Duplicate Stripe webhook events are deduped before state application
-- 🔜 Revoked installation denied (revocation + device-status checks implemented in the
-  activation path; DB-backed integration test pending); duplicate usage event processed
-  once (logic + schema present; integration test pending endpoint wiring)
+- 🔜 Revoked installation denied, and duplicate usage events processed once (both
+  implemented and proven against a live local PostgreSQL; CI-runnable DB-backed
+  integration tests pending)
 
 ## 3. Deferred (require live or mocked Stripe / Supabase)
 

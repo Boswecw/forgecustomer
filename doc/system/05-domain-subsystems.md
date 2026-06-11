@@ -112,22 +112,51 @@ Usage accounting is ledger-first:
 - `quota_decisions` records explainable allow/deny decisions.
 - Meter units must be explicit.
 
-The pure usage decision logic is implemented. Reserve/commit/release/current endpoints
-remain pending.
+Implemented behavior:
+
+- Limits resolve from the assembled entitlement quotas (cadence-qualified key first);
+  uncataloged quota rows leave a meter uncapped, while the included plan zeroes the paid
+  meters for free customers.
+- Reserve and direct commit share one decision path under a `(customer, meter, period)`
+  totals lock; every decision (allow and deny) is recorded in `quota_decisions`.
+- Reservations dedupe on `(customer, idempotency key)`, commits dedupe the same pair in
+  the ledger; replays return the original row and never double-charge.
+- Stale pending reservations expire lazily inside that lock and via the
+  `workers::usage` background sweeper; committing an expired reservation fails closed
+  and frees its hold.
+- Threshold crossings queue `quota_threshold_reached` once per
+  (customer, meter, period, threshold); denied direct commits queue
+  `usage_commit_failed`.
+- Period totals are derived and were verified live to equal the ledger sum.
 
 ### Privacy and deletion
 
 The schema includes policy versions, consent records, and account deletion requests.
-Deletion must anonymize/delete direct PII while preserving legally required accounting
-records with explicit exceptions. Downstream deletion/anonymization events must be
-sanitized before entering the outbox.
+
+Implemented behavior:
+
+- The state machine (`requested → verified → cooling_off → processing → completed`,
+  with `rejected`/`canceled` terminals) is pure logic in `domain::deletion`; customers
+  request and cancel, operators advance, reject, and execute.
+- Cooling-off is non-destructive so a customer cancel restores nothing; the window is
+  stamped on entry and entering `processing` fails closed while it has not elapsed.
+- Execution anonymizes in one transaction — profile PII, contact emails, device labels
+  (devices revoked), licenses revoked with explicit revocation records, installations
+  deactivated, overrides deactivated — writes a PII-free receipt with the retention
+  exceptions, queues the sanitized `customer_anonymized` event, and audits
+  `deletion_completed`. It refuses while a non-terminal subscription remains.
+- Legally required accounting records (billing/invoice references, audit, usage ledger,
+  consent records) are retained per `docs/PRIVACY.md`; anonymized accounts fail closed
+  at the auth boundary.
 
 ### Admin operations
 
-Admin APIs use a separate operator issuer and audience. A future admin mutation must:
+Admin APIs use a separate operator issuer and audience (Forge Command). Every
+implemented admin mutation:
 
-- Validate operator authorization.
-- Require a reason for material commercial changes.
-- Write commercial audit.
-- Preserve append-only ledgers.
-- Emit a sanitized outbox event when downstream evidence is required.
+- Validates operator authorization (mutations additionally require the `admin` role).
+- Requires a written reason for material commercial changes.
+- Writes operator-actor commercial audit.
+- Preserves append-only ledgers (usage corrections are compensating adjustment events
+  behind a required idempotency key).
+- Emits a sanitized outbox event where the event contract defines one.

@@ -978,6 +978,41 @@ fn is_stale_event(incoming: Option<DateTime<Utc>>, existing: Option<DateTime<Utc
     }
 }
 
+/// Customer-facing subscription summary row.
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct SubscriptionSummaryRow {
+    pub id: Uuid,
+    pub product_key: String,
+    pub plan_key: String,
+    pub status: String,
+    pub grants_cloud: bool,
+    pub current_period_end: Option<DateTime<Utc>>,
+    pub cancel_at_period_end: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+pub async fn list_customer_subscriptions(
+    pool: &PgPool,
+    customer_id: Uuid,
+) -> Result<Vec<SubscriptionSummaryRow>, sqlx::Error> {
+    sqlx::query_as::<_, SubscriptionSummaryRow>(
+        r#"
+        select s.id, p.key as product_key, pl.key as plan_key, s.status,
+               s.status in ('active','trialing') as grants_cloud,
+               s.current_period_end, s.cancel_at_period_end, s.created_at
+        from public.subscriptions s
+        join public.plan_versions pv on pv.id = s.plan_version_id
+        join public.plans pl on pl.id = pv.plan_id
+        join public.products p on p.id = pl.product_id
+        where s.customer_id = $1
+        order by s.created_at desc
+        "#,
+    )
+    .bind(customer_id)
+    .fetch_all(pool)
+    .await
+}
+
 // --- Admin resync (operator-driven; Forge Command surface) ---------------------
 
 /// Subscription identifiers needed to pull current truth from Stripe.

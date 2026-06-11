@@ -1,4 +1,8 @@
-# ForgeCustomer
+<p align="center">
+  <img src="docs/assets/forgecustomer.png" alt="Forge Customer" width="260" />
+</p>
+
+<h1 align="center">ForgeCustomer</h1>
 
 ForgeCustomer is the **customer, commerce, licensing, entitlement, installation, and
 usage authority** for Boswell Digital Solutions products. The initial product served is

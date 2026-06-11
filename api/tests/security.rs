@@ -55,6 +55,7 @@ fn test_config() -> Config {
     // config directly) observes a short deadline.
     std::env::set_var("MAX_BODY_BYTES", "2048");
     std::env::set_var("REQUEST_TIMEOUT_SECS", "30");
+    std::env::set_var("RATE_LIMIT_PER_MINUTE", "300");
     Config::from_env().expect("config")
 }
 
@@ -529,6 +530,108 @@ async fn slow_requests_time_out_fail_closed() {
         "nosniff"
     );
     assert!(res.headers().get("x-correlation-id").is_some());
+}
+
+#[tokio::test]
+async fn rate_limited_requests_get_429_through_the_contract() {
+    let mut config = test_config();
+    config.rate_limit_per_minute = 2;
+    let app = build_router(AppState::build(config).expect("state"));
+
+    // A fixed-window boundary can reset the budget at most once mid-test, so five
+    // requests against a budget of two must surface at least one 429.
+    let mut throttled = None;
+    for _ in 0..5 {
+        let req = Request::builder()
+            .uri("/v1/health")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        if res.status() == StatusCode::TOO_MANY_REQUESTS {
+            throttled = Some(res);
+            break;
+        }
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+    let res = throttled.expect("budget of 2 must throttle within 5 requests");
+
+    assert!(res.headers().get("retry-after").is_some());
+    // The 429 flows out through the security-header and correlation layers and renders
+    // through the shared error contract.
+    assert_eq!(
+        res.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "RATE_LIMITED");
+    assert!(body["error"]["correlation_id"].is_string());
+}
+
+#[tokio::test]
+async fn rate_limit_budgets_are_per_client() {
+    let mut config = test_config();
+    config.rate_limit_per_minute = 1;
+    let app = build_router(AppState::build(config).expect("state"));
+
+    // Exhaust client A's budget (the rightmost x-forwarded-for entry is the key).
+    let mut saw_throttle = false;
+    for _ in 0..3 {
+        let req = Request::builder()
+            .uri("/v1/health")
+            .header("x-forwarded-for", "203.0.113.7")
+            .body(Body::empty())
+            .unwrap();
+        let status = app.clone().oneshot(req).await.unwrap().status();
+        saw_throttle |= status == StatusCode::TOO_MANY_REQUESTS;
+    }
+    assert!(saw_throttle, "client A must be throttled");
+
+    // Client B's budget is untouched by A's burst.
+    let req = Request::builder()
+        .uri("/v1/health")
+        .header("x-forwarded-for", "203.0.113.8")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.oneshot(req).await.unwrap().status(),
+        StatusCode::OK,
+        "client B must not be throttled"
+    );
+}
+
+#[tokio::test]
+async fn hostile_correlation_ids_are_replaced() {
+    // Client-supplied correlation ids land in audit rows and logs, so oversized or
+    // non-log-safe values must be swapped for a generated id rather than echoed.
+    for hostile in [&"x".repeat(4096), "spaces and (parens)"] {
+        let req = Request::builder()
+            .uri("/v1/health")
+            .header("x-correlation-id", hostile)
+            .body(Body::empty())
+            .unwrap();
+        let app = build_router(test_state());
+        let res = app.oneshot(req).await.unwrap();
+        let echoed = res
+            .headers()
+            .get("x-correlation-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap();
+        assert!(echoed.starts_with("corr_"), "got {echoed}");
+    }
+
+    // A tame client id is still honored end to end.
+    let req = Request::builder()
+        .uri("/v1/health")
+        .header("x-correlation-id", "client-trace.42")
+        .body(Body::empty())
+        .unwrap();
+    let app = build_router(test_state());
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        res.headers().get("x-correlation-id").unwrap(),
+        "client-trace.42"
+    );
 }
 
 #[tokio::test]

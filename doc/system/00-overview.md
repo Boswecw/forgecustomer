@@ -19,8 +19,8 @@ Implemented today:
 
 - Rust workspace with `forgecustomer-api`.
 - Environment-driven configuration with fail-closed token verification.
-- Axum router, liveness/readiness/version endpoints, correlation IDs, and security
-  headers.
+- Axum router, liveness/readiness/version endpoints, correlation IDs, security headers,
+  and router-level request guards (per-client rate limiting, body cap, timeout).
 - API-owned account provisioning that maps a Supabase auth subject to one ForgeCustomer
   business customer profile idempotently.
 - Stripe Checkout Session creation for active paid catalog plans.
@@ -77,7 +77,7 @@ api/src/config.rs       Environment configuration
 api/src/error.rs        Stable JSON error contract
 api/src/state.rs        Shared app state, SQLx pool, signing, validators, HTTP client
 api/src/auth/           JWT validation, customer/admin extractors
-api/src/middleware/     Correlation ID and security headers
+api/src/middleware/     Correlation ID, security headers, per-client rate limiting
 api/src/domain/         Pure business rules
 api/src/routes/         HTTP routes
 api/src/repositories/   SQLx repository functions

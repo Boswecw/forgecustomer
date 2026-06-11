@@ -62,8 +62,8 @@ Implemented today:
 
 - Rust workspace with `forgecustomer-api`.
 - Environment-driven configuration with fail-closed token verification.
-- Axum router, liveness/readiness/version endpoints, correlation IDs, and security
-  headers.
+- Axum router, liveness/readiness/version endpoints, correlation IDs, security headers,
+  and router-level request guards (per-client rate limiting, body cap, timeout).
 - API-owned account provisioning that maps a Supabase auth subject to one ForgeCustomer
   business customer profile idempotently.
 - Stripe Checkout Session creation for active paid catalog plans.
@@ -120,7 +120,7 @@ api/src/config.rs       Environment configuration
 api/src/error.rs        Stable JSON error contract
 api/src/state.rs        Shared app state, SQLx pool, signing, validators, HTTP client
 api/src/auth/           JWT validation, customer/admin extractors
-api/src/middleware/     Correlation ID and security headers
+api/src/middleware/     Correlation ID, security headers, per-client rate limiting
 api/src/domain/         Pure business rules
 api/src/routes/         HTTP routes
 api/src/repositories/   SQLx repository functions
@@ -255,10 +255,13 @@ available. `/v1/ready` is the deploy/load-balancer gate because it executes `sel
 
 1. `correlation_id` middleware propagates or creates `x-correlation-id`.
 2. `security_headers` middleware adds conservative response headers.
-3. Router-level guards bound every request: bodies over `MAX_BODY_BYTES` are rejected
-   `413`, and handling that exceeds `REQUEST_TIMEOUT_SECS` returns `503` (retriable —
-   Stripe re-delivers webhooks and processing is idempotent). Both responses still carry
-   the correlation and security headers.
+3. Router-level guards bound every request: clients over their `RATE_LIMIT_PER_MINUTE`
+   budget get `429 RATE_LIMITED` (error contract + `retry-after`; keyed by the
+   proxy-appended rightmost `x-forwarded-for` entry, falling back to the socket peer),
+   bodies over `MAX_BODY_BYTES` are rejected `413`, and handling that exceeds
+   `REQUEST_TIMEOUT_SECS` returns `503` (retriable — Stripe re-delivers webhooks and
+   processing is idempotent). Guard responses still carry the correlation and security
+   headers.
 4. Customer/admin extractors parse `Authorization: Bearer <jwt>`.
 5. The matching JWT validator checks signature, issuer, audience, and expiry.
 6. New customers call `POST /v1/account/provision`; this validates the Supabase JWT and
@@ -449,15 +452,18 @@ INTERNAL
 Database errors are logged server-side and mapped to `INTERNAL` without leaking database
 details to the client.
 
-Two router-level guards respond before handlers run and return plain (non-enveloped)
-responses: bodies over `MAX_BODY_BYTES` are rejected `413`, and requests exceeding
-`REQUEST_TIMEOUT_SECS` return `503`. Both still carry the correlation and security
-headers.
+Router-level guards respond before handlers run. Clients exceeding their per-minute
+budget get `429 RATE_LIMITED` through the standard envelope with a `retry-after` header.
+Two guards return plain (non-enveloped) responses: bodies over `MAX_BODY_BYTES` are
+rejected `413`, and requests exceeding `REQUEST_TIMEOUT_SECS` return `503`. All guard
+responses still carry the correlation and security headers.
 
 ### Idempotency and correlation
 
 - Every response includes `x-correlation-id`.
-- Clients may provide `x-correlation-id`; otherwise the service generates `corr_<uuid>`.
+- Clients may provide `x-correlation-id` (up to 128 chars of `[A-Za-z0-9._-]`, since the
+  value lands in audit rows and logs); anything else — or no header — yields a generated
+  `corr_<uuid>`.
 - Mutating endpoints that can be retried should accept `Idempotency-Key`.
 - Usage, installation, Stripe webhook, and outbox delivery paths must treat replay as
   expected behavior, not as an exceptional production incident.
@@ -875,6 +881,7 @@ required variables fail startup. Empty token-verification secrets fail token val
 | `OFFLINE_GRACE_DAYS` | no | `14` | Offline grace window. |
 | `REQUEST_TIMEOUT_SECS` | no | `30` | Per-request deadline enforced by the router; expiry returns `503`. |
 | `MAX_BODY_BYTES` | no | `1048576` | Request body cap enforced by the router; oversized bodies return `413`. |
+| `RATE_LIMIT_PER_MINUTE` | no | `300` | Per-client (per-IP) request budget per minute; exceeding it returns `429 RATE_LIMITED` with `retry-after`. `0` disables. |
 
 `.env.example` is a template only. Real values must come from a secret manager or the
 deployment environment.

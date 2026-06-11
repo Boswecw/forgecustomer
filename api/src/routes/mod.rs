@@ -132,18 +132,24 @@ pub fn build_router(state: AppState) -> Router {
         .merge(customer)
         .merge(webhooks)
         .merge(admin)
-        // Layer order matters (later = outer): timeout/body-cap rejections still flow
-        // back out through security_headers and correlation_id, so a 503/413 carries the
+        // Layer order matters (later = outer): guard rejections (429/503/413) still flow
+        // back out through security_headers and correlation_id, so they carry the
         // standard headers. Timeouts render 503 (retriable; Stripe re-delivers webhooks
         // and processing is idempotent). DefaultBodyLimit governs axum extractors
         // (otherwise capped at axum's 2 MiB default, ignoring config);
-        // RequestBodyLimitLayer enforces the same cap for any direct body reads.
+        // RequestBodyLimitLayer enforces the same cap for any direct body reads. The
+        // rate limiter sits outside both so a throttled client spends no body/timeout
+        // machinery, but inside correlation_id so the 429 is attributable.
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             request_timeout,
         ))
         .layer(DefaultBodyLimit::max(max_body_bytes))
         .layer(RequestBodyLimitLayer::new(max_body_bytes))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            mw::rate_limit::enforce,
+        ))
         .layer(axum::middleware::from_fn(mw::security_headers))
         .layer(axum::middleware::from_fn(mw::correlation_id))
         .with_state(state)

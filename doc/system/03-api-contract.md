@@ -91,8 +91,12 @@ activate subscriptions or entitlements.
 
 ### Admin routes
 
-Admin routes require an operator JWT from `ADMIN_JWT_ISSUER` and `ADMIN_JWT_AUDIENCE`.
-A valid customer token must never satisfy an admin extractor.
+Admin routes require an **EdDSA** operator JWT minted by **Forge Command's Token Authority**
+(issuer `ADMIN_JWT_ISSUER`, e.g. `forge_command_local`; audience `ADMIN_JWT_AUDIENCE`, e.g.
+`forgecustomer-admin`), verified against Forge Command's published Ed25519 **public key**
+(`ADMIN_JWT_PUBLIC_KEY`) — there is no shared admin secret. The admin role is carried as
+`roles=["admin"]` or the capability `scope` (e.g. `admin`). A valid customer token (Supabase
+HS256) must never satisfy an admin extractor.
 
 Current route surface:
 

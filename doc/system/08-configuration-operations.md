@@ -14,9 +14,9 @@ required variables fail startup. Empty token-verification secrets fail token val
 | `SUPABASE_JWT_ISSUER` | yes | none | Customer JWT issuer. |
 | `SUPABASE_JWT_AUDIENCE` | no | `authenticated` | Customer JWT audience. |
 | `SUPABASE_JWT_SECRET` | required to accept customer tokens | empty | Customer JWT HS256 verification secret. |
-| `ADMIN_JWT_ISSUER` | yes | none | Operator token issuer. |
-| `ADMIN_JWT_AUDIENCE` | yes | none | Operator token audience. |
-| `ADMIN_JWT_SECRET` | required to accept admin tokens | empty | Admin JWT HS256 verification secret. |
+| `ADMIN_JWT_ISSUER` | yes | none | Operator token issuer (Forge Command Token Authority, e.g. `forge_command_local`). |
+| `ADMIN_JWT_AUDIENCE` | yes | none | Operator token audience (e.g. `forgecustomer-admin`). |
+| `ADMIN_JWT_PUBLIC_KEY` | required to accept admin tokens | empty | PEM-encoded Ed25519 (SPKI) **public** key that verifies operator JWTs minted by Forge Command. No shared secret. |
 | `STRIPE_SECRET_KEY` | required for checkout/webhook work | empty | Stripe API secret. |
 | `STRIPE_WEBHOOK_SECRET` | required for webhook work | empty | Stripe webhook verification secret. |
 | `ENTITLEMENT_SIGNING_PRIVATE_KEY` | yes | none | Base64 Ed25519 seed for snapshot signing. |

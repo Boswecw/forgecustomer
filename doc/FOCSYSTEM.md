@@ -372,8 +372,12 @@ activate subscriptions or entitlements.
 
 ### Admin routes
 
-Admin routes require an operator JWT from `ADMIN_JWT_ISSUER` and `ADMIN_JWT_AUDIENCE`.
-A valid customer token must never satisfy an admin extractor.
+Admin routes require an **EdDSA** operator JWT minted by **Forge Command's Token Authority**
+(issuer `ADMIN_JWT_ISSUER`, e.g. `forge_command_local`; audience `ADMIN_JWT_AUDIENCE`, e.g.
+`forgecustomer-admin`), verified against Forge Command's published Ed25519 **public key**
+(`ADMIN_JWT_PUBLIC_KEY`) — there is no shared admin secret. The admin role is carried as
+`roles=["admin"]` or the capability `scope` (e.g. `admin`). A valid customer token (Supabase
+HS256) must never satisfy an admin extractor.
 
 Current route surface:
 
@@ -786,7 +790,6 @@ Server-side only:
 
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `SUPABASE_JWT_SECRET`
-- `ADMIN_JWT_SECRET`
 - `STRIPE_SECRET_KEY`
 - `STRIPE_WEBHOOK_SECRET`
 - `ENTITLEMENT_SIGNING_PRIVATE_KEY`
@@ -850,9 +853,9 @@ required variables fail startup. Empty token-verification secrets fail token val
 | `SUPABASE_JWT_ISSUER` | yes | none | Customer JWT issuer. |
 | `SUPABASE_JWT_AUDIENCE` | no | `authenticated` | Customer JWT audience. |
 | `SUPABASE_JWT_SECRET` | required to accept customer tokens | empty | Customer JWT HS256 verification secret. |
-| `ADMIN_JWT_ISSUER` | yes | none | Operator token issuer. |
-| `ADMIN_JWT_AUDIENCE` | yes | none | Operator token audience. |
-| `ADMIN_JWT_SECRET` | required to accept admin tokens | empty | Admin JWT HS256 verification secret. |
+| `ADMIN_JWT_ISSUER` | yes | none | Operator token issuer (Forge Command Token Authority, e.g. `forge_command_local`). |
+| `ADMIN_JWT_AUDIENCE` | yes | none | Operator token audience (e.g. `forgecustomer-admin`). |
+| `ADMIN_JWT_PUBLIC_KEY` | required to accept admin tokens | empty | PEM-encoded Ed25519 (SPKI) **public** key that verifies operator JWTs minted by Forge Command. No shared secret. |
 | `STRIPE_SECRET_KEY` | required for checkout/webhook work | empty | Stripe API secret. |
 | `STRIPE_WEBHOOK_SECRET` | required for webhook work | empty | Stripe webhook verification secret. |
 | `ENTITLEMENT_SIGNING_PRIVATE_KEY` | yes | none | Base64 Ed25519 seed for snapshot signing. |

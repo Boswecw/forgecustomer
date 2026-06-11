@@ -47,8 +47,8 @@ impl AppState {
             &config.supabase_jwt_issuer,
             &config.supabase_jwt_audience,
         );
-        let admin_validator = JwtValidator::hs256(
-            &config.admin_jwt_secret,
+        let admin_validator = JwtValidator::eddsa(
+            &config.admin_jwt_public_key,
             &config.admin_jwt_issuer,
             &config.admin_jwt_audience,
         );

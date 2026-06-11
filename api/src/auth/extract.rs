@@ -131,9 +131,10 @@ impl FromRequestParts<AppState> for AdminContext {
         // Validated against the ADMIN issuer/audience only.
         let claims = state.admin_validator.validate(token).map_err(attach)?;
 
+        let roles = claims.operator_roles();
         Ok(AdminContext {
             operator_id: claims.sub,
-            roles: claims.roles,
+            roles,
         })
     }
 }

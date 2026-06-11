@@ -27,7 +27,32 @@ pub struct Claims {
     /// Operator roles/capabilities (admin tokens).
     #[serde(default)]
     pub roles: Vec<String>,
+    /// Operator capability scope. Forge Command's Token Authority issues a `scope` string
+    /// (e.g. "admin") rather than a `roles` array; [`Claims::operator_roles`] bridges them.
+    #[serde(default)]
+    pub scope: Option<String>,
     pub exp: usize,
+}
+
+impl Claims {
+    /// Operator roles for admin authorization.
+    ///
+    /// Forge Command's Token Authority mints EdDSA operator tokens carrying a `scope`
+    /// string instead of a `roles` array. When `roles` is empty we derive it from `scope`,
+    /// mapping the full scope `*` to the `admin` role and otherwise treating each
+    /// whitespace-separated scope token as a role of the same name.
+    pub fn operator_roles(&self) -> Vec<String> {
+        if !self.roles.is_empty() {
+            return self.roles.clone();
+        }
+        match self.scope.as_deref() {
+            Some(scope) => scope
+                .split_whitespace()
+                .map(|token| if token == "*" { "admin" } else { token }.to_string())
+                .collect(),
+            None => Vec::new(),
+        }
+    }
 }
 
 /// Validates JWTs for a particular issuer/audience using an HS256 secret.
@@ -50,6 +75,32 @@ impl JwtValidator {
             key: DecodingKey::from_secret(secret.as_bytes()),
             validation,
             configured: !secret.is_empty(),
+        }
+    }
+
+    /// Build a validator for EdDSA (Ed25519) tokens verified against a PEM-encoded public
+    /// key. Forge Command's Token Authority signs operator tokens with Ed25519 and publishes
+    /// the SPKI public key; ForgeCustomer verifies admin tokens against it — no shared
+    /// secret. An empty or unparseable key fails closed (never accepts a token).
+    pub fn eddsa(public_key_pem: &str, issuer: &str, audience: &str) -> Self {
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.set_issuer(&[issuer]);
+        validation.set_audience(&[audience]);
+        validation.set_required_spec_claims(&["exp", "aud", "iss"]);
+        // Fail closed on expiry: no clock-skew leeway for operator tokens.
+        validation.leeway = 0;
+        match DecodingKey::from_ed_pem(public_key_pem.as_bytes()) {
+            Ok(key) => Self {
+                key,
+                validation,
+                configured: true,
+            },
+            Err(_) => Self {
+                // Fail closed: an unconfigured/unparseable key can never verify a token.
+                key: DecodingKey::from_secret(&[]),
+                validation,
+                configured: false,
+            },
         }
     }
 
@@ -242,5 +293,45 @@ mod tests {
         assert_eq!(bearer_token(Some("Bearer abc")).unwrap(), "abc");
         assert!(bearer_token(None).is_err());
         assert!(bearer_token(Some("Basic abc")).is_err());
+    }
+
+    fn claims_with(roles: Vec<&str>, scope: Option<&str>) -> Claims {
+        Claims {
+            sub: "op".into(),
+            email: None,
+            role: None,
+            roles: roles.into_iter().map(String::from).collect(),
+            scope: scope.map(String::from),
+            exp: 0,
+        }
+    }
+
+    #[test]
+    fn operator_roles_prefers_explicit_roles() {
+        let claims = claims_with(vec!["admin"], Some("read:foo"));
+        assert_eq!(claims.operator_roles(), vec!["admin".to_string()]);
+    }
+
+    #[test]
+    fn operator_roles_derives_from_scope_when_roles_absent() {
+        let claims = claims_with(vec![], Some("admin"));
+        assert_eq!(claims.operator_roles(), vec!["admin".to_string()]);
+    }
+
+    #[test]
+    fn operator_roles_maps_wildcard_scope_to_admin() {
+        let claims = claims_with(vec![], Some("*"));
+        assert!(claims.operator_roles().contains(&"admin".to_string()));
+    }
+
+    #[test]
+    fn operator_roles_empty_without_roles_or_scope() {
+        assert!(claims_with(vec![], None).operator_roles().is_empty());
+    }
+
+    #[test]
+    fn eddsa_unconfigured_key_fails_closed() {
+        let v = JwtValidator::eddsa("", "forge_command_local", "forgecustomer-admin");
+        assert!(v.validate("any.token.here").is_err());
     }
 }

@@ -25,7 +25,13 @@ const SUPA_AUD: &str = "authenticated";
 const SUPA_SECRET: &str = "supabase-secret";
 const ADMIN_ISS: &str = "https://operators.local";
 const ADMIN_AUD: &str = "forgecustomer-admin";
-const ADMIN_SECRET: &str = "admin-secret";
+/// Throwaway Ed25519 test keypair (PKCS8 private / SPKI public) standing in for Forge
+/// Command's Token Authority signing key: operator tokens are signed with the private key,
+/// and the admin validator verifies them with the public key.
+const ADMIN_ED_PRIVATE_PEM: &str =
+    "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIK0QNf3nxqiBF98HL/aSUWke0fE4CuryMonE9nhFvqnL\n-----END PRIVATE KEY-----\n";
+const ADMIN_ED_PUBLIC_PEM: &str =
+    "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAYOHufz/uvwEGo+RUA4tUz7spzpbs9LKrY6FtlgydMGY=\n-----END PUBLIC KEY-----\n";
 const STRIPE_WEBHOOK_SECRET: &str = "whsec_test";
 
 fn test_state() -> AppState {
@@ -39,7 +45,7 @@ fn test_state() -> AppState {
     std::env::set_var("SUPABASE_JWT_SECRET", SUPA_SECRET);
     std::env::set_var("ADMIN_JWT_ISSUER", ADMIN_ISS);
     std::env::set_var("ADMIN_JWT_AUDIENCE", ADMIN_AUD);
-    std::env::set_var("ADMIN_JWT_SECRET", ADMIN_SECRET);
+    std::env::set_var("ADMIN_JWT_PUBLIC_KEY", ADMIN_ED_PUBLIC_PEM);
     std::env::set_var("STRIPE_WEBHOOK_SECRET", STRIPE_WEBHOOK_SECRET);
     std::env::set_var("ENTITLEMENT_SIGNING_PRIVATE_KEY", &seed);
     std::env::set_var("ENTITLEMENT_SIGNING_KEY_ID", "entitlement-key-1");
@@ -64,6 +70,17 @@ fn jwt(claims: Value, secret: &str) -> String {
         &Header::new(Algorithm::HS256),
         &claims,
         &EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .unwrap()
+}
+
+/// Mint an EdDSA operator token the way Forge Command's Token Authority does, signed with
+/// the test Ed25519 private key the admin validator is configured to trust.
+fn admin_jwt(claims: Value) -> String {
+    encode(
+        &Header::new(Algorithm::EdDSA),
+        &claims,
+        &EncodingKey::from_ed_pem(ADMIN_ED_PRIVATE_PEM.as_bytes()).unwrap(),
     )
     .unwrap()
 }
@@ -110,11 +127,8 @@ async fn customer_token_cannot_access_admin_route() {
 
 #[tokio::test]
 async fn valid_operator_token_clears_admin_auth() {
-    let token = jwt(
-        json!({ "sub": "operator-7", "roles": ["support"],
-                "iss": ADMIN_ISS, "aud": ADMIN_AUD, "exp": now() + 3600 }),
-        ADMIN_SECRET,
-    );
+    let token = admin_jwt(json!({ "sub": "operator-7", "roles": ["support"],
+        "iss": ADMIN_ISS, "aud": ADMIN_AUD, "exp": now() + 3600 }));
     let req = Request::builder()
         .uri("/v1/admin/customers")
         .header("authorization", format!("Bearer {token}"))
@@ -128,11 +142,8 @@ async fn valid_operator_token_clears_admin_auth() {
 #[tokio::test]
 async fn admin_mutations_require_admin_role() {
     // A valid operator token WITHOUT the `admin` role: reads pass auth, mutations 403.
-    let token = jwt(
-        json!({ "sub": "operator-7", "roles": ["support"],
-                "iss": ADMIN_ISS, "aud": ADMIN_AUD, "exp": now() + 3600 }),
-        ADMIN_SECRET,
-    );
+    let token = admin_jwt(json!({ "sub": "operator-7", "roles": ["support"],
+        "iss": ADMIN_ISS, "aud": ADMIN_AUD, "exp": now() + 3600 }));
     let id = "9f1c2d3e-4b5a-6789-0abc-def012345678";
     for uri in [
         format!("/v1/admin/customers/{id}/suspend"),
@@ -170,11 +181,8 @@ async fn admin_mutations_require_admin_role() {
 
 #[tokio::test]
 async fn admin_mutations_validate_reason_before_db_write() {
-    let token = jwt(
-        json!({ "sub": "operator-7", "roles": ["admin"],
-                "iss": ADMIN_ISS, "aud": ADMIN_AUD, "exp": now() + 3600 }),
-        ADMIN_SECRET,
-    );
+    let token = admin_jwt(json!({ "sub": "operator-7", "roles": ["admin"],
+        "iss": ADMIN_ISS, "aud": ADMIN_AUD, "exp": now() + 3600 }));
     let req = Request::builder()
         .method("POST")
         .uri("/v1/admin/customers/9f1c2d3e-4b5a-6789-0abc-def012345678/suspend")
@@ -195,11 +203,8 @@ async fn admin_mutations_validate_reason_before_db_write() {
 
 #[tokio::test]
 async fn admin_usage_adjust_requires_idempotency_key() {
-    let token = jwt(
-        json!({ "sub": "operator-7", "roles": ["admin"],
-                "iss": ADMIN_ISS, "aud": ADMIN_AUD, "exp": now() + 3600 }),
-        ADMIN_SECRET,
-    );
+    let token = admin_jwt(json!({ "sub": "operator-7", "roles": ["admin"],
+        "iss": ADMIN_ISS, "aud": ADMIN_AUD, "exp": now() + 3600 }));
     let req = Request::builder()
         .method("POST")
         .uri("/v1/admin/usage/adjust")
@@ -216,6 +221,27 @@ async fn admin_usage_adjust_requires_idempotency_key() {
         ))
         .unwrap();
     assert_eq!(status_of(req).await, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn operator_scope_admin_satisfies_mutation_gate() {
+    // Forge Command's Token Authority issues `scope` (not `roles`); scope "admin" must
+    // satisfy the admin role gate. Auth + role + reason pass, then the unreachable DB 500s.
+    let token = admin_jwt(json!({
+        "sub": "forge_command_local", "scope": "admin",
+        "iss": ADMIN_ISS, "aud": ADMIN_AUD, "exp": now() + 3600
+    }));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/admin/customers/9f1c2d3e-4b5a-6789-0abc-def012345678/suspend")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .header("idempotency-key", "scope-admin-1")
+        .body(Body::from(
+            json!({ "reason": "scope-derived admin role" }).to_string(),
+        ))
+        .unwrap();
+    assert_eq!(status_of(req).await, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[tokio::test]

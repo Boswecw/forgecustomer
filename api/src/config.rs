@@ -20,8 +20,9 @@ pub struct Config {
 
     pub admin_jwt_issuer: String,
     pub admin_jwt_audience: String,
-    /// HS256 secret used to verify operator/admin JWTs.
-    pub admin_jwt_secret: String,
+    /// PEM-encoded Ed25519 public key used to verify operator/admin JWTs minted by Forge
+    /// Command's Token Authority. Empty = the admin surface fails closed.
+    pub admin_jwt_public_key: String,
 
     pub stripe_secret_key: String,
     pub stripe_webhook_secret: String,
@@ -120,7 +121,7 @@ impl Config {
             supabase_jwt_secret: optional("SUPABASE_JWT_SECRET", ""),
             admin_jwt_issuer: require("ADMIN_JWT_ISSUER")?,
             admin_jwt_audience: require("ADMIN_JWT_AUDIENCE")?,
-            admin_jwt_secret: optional("ADMIN_JWT_SECRET", ""),
+            admin_jwt_public_key: optional("ADMIN_JWT_PUBLIC_KEY", ""),
             stripe_secret_key: optional("STRIPE_SECRET_KEY", ""),
             stripe_webhook_secret: optional("STRIPE_WEBHOOK_SECRET", ""),
             stripe_api_base: optional("STRIPE_API_BASE", "https://api.stripe.com"),

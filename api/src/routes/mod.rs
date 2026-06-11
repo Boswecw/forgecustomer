@@ -10,12 +10,14 @@ pub mod entitlements;
 pub mod health;
 
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
 
 use crate::auth::{AdminContext, AuthUserContext, CustomerContext};
@@ -123,10 +125,25 @@ pub fn build_router(state: AppState) -> Router {
             post(admin_deletion_execute),
         );
 
+    let request_timeout = state.config.request_timeout;
+    let max_body_bytes = state.config.max_body_bytes;
+
     public
         .merge(customer)
         .merge(webhooks)
         .merge(admin)
+        // Layer order matters (later = outer): timeout/body-cap rejections still flow
+        // back out through security_headers and correlation_id, so a 503/413 carries the
+        // standard headers. Timeouts render 503 (retriable; Stripe re-delivers webhooks
+        // and processing is idempotent). DefaultBodyLimit governs axum extractors
+        // (otherwise capped at axum's 2 MiB default, ignoring config);
+        // RequestBodyLimitLayer enforces the same cap for any direct body reads.
+        .layer(TimeoutLayer::with_status_code(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            request_timeout,
+        ))
+        .layer(DefaultBodyLimit::max(max_body_bytes))
+        .layer(RequestBodyLimitLayer::new(max_body_bytes))
         .layer(axum::middleware::from_fn(mw::security_headers))
         .layer(axum::middleware::from_fn(mw::correlation_id))
         .with_state(state)

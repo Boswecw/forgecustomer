@@ -34,7 +34,7 @@ const ADMIN_ED_PUBLIC_PEM: &str =
     "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAYOHufz/uvwEGo+RUA4tUz7spzpbs9LKrY6FtlgydMGY=\n-----END PUBLIC KEY-----\n";
 const STRIPE_WEBHOOK_SECRET: &str = "whsec_test";
 
-fn test_state() -> AppState {
+fn test_config() -> Config {
     // A throwaway base64 32-byte Ed25519 seed.
     let seed = base64_seed();
     std::env::set_var("DATABASE_URL", "postgres://user@127.0.0.1:1/none");
@@ -49,8 +49,17 @@ fn test_state() -> AppState {
     std::env::set_var("STRIPE_WEBHOOK_SECRET", STRIPE_WEBHOOK_SECRET);
     std::env::set_var("ENTITLEMENT_SIGNING_PRIVATE_KEY", &seed);
     std::env::set_var("ENTITLEMENT_SIGNING_KEY_ID", "entitlement-key-1");
-    let config = Config::from_env().expect("config");
-    AppState::build(config).expect("state")
+    // Pinned for every test (env vars are process-global, so tests must agree on the
+    // values): a small body cap so the oversized-body test stays cheap, and the default
+    // request timeout so only the dedicated timeout test (which overrides the parsed
+    // config directly) observes a short deadline.
+    std::env::set_var("MAX_BODY_BYTES", "2048");
+    std::env::set_var("REQUEST_TIMEOUT_SECS", "30");
+    Config::from_env().expect("config")
+}
+
+fn test_state() -> AppState {
+    AppState::build(test_config()).expect("state")
 }
 
 fn base64_seed() -> String {
@@ -476,6 +485,50 @@ async fn stripe_webhook_rejects_malformed_signed_event_before_db_write() {
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["error"]["code"], "BAD_REQUEST");
+}
+
+#[tokio::test]
+async fn oversized_request_body_is_rejected() {
+    // 8 KiB against the 2 KiB test cap (MAX_BODY_BYTES). The webhook route has no
+    // token gate in front of the body read, so a 413 here proves the configured cap —
+    // not signature verification or handler logic — rejected the request.
+    let payload = vec![b'{'; 8 * 1024];
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/webhooks/stripe")
+        .header("content-type", "application/json")
+        .header("stripe-signature", "t=1,v1=ab")
+        .body(Body::from(payload))
+        .unwrap();
+    assert_eq!(status_of(req).await, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn slow_requests_time_out_fail_closed() {
+    // Shrink the request timeout well below the 1s database acquire timeout: the admin
+    // listing clears auth, then hangs on the unreachable test database, so the timeout
+    // layer must answer first.
+    let mut config = test_config();
+    config.request_timeout = std::time::Duration::from_millis(100);
+    let app = build_router(AppState::build(config).expect("state"));
+
+    let token = admin_jwt(json!({ "sub": "operator-7", "roles": ["support"],
+        "iss": ADMIN_ISS, "aud": ADMIN_AUD, "exp": now() + 3600 }));
+    let req = Request::builder()
+        .uri("/v1/admin/customers")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // The timeout response still flows out through the security-header and correlation
+    // layers (layer ordering in `build_router`).
+    assert_eq!(
+        res.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    assert!(res.headers().get("x-correlation-id").is_some());
 }
 
 #[tokio::test]

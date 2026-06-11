@@ -255,21 +255,25 @@ available. `/v1/ready` is the deploy/load-balancer gate because it executes `sel
 
 1. `correlation_id` middleware propagates or creates `x-correlation-id`.
 2. `security_headers` middleware adds conservative response headers.
-3. Customer/admin extractors parse `Authorization: Bearer <jwt>`.
-4. The matching JWT validator checks signature, issuer, audience, and expiry.
-5. New customers call `POST /v1/account/provision`; this validates the Supabase JWT and
+3. Router-level guards bound every request: bodies over `MAX_BODY_BYTES` are rejected
+   `413`, and handling that exceeds `REQUEST_TIMEOUT_SECS` returns `503` (retriable —
+   Stripe re-delivers webhooks and processing is idempotent). Both responses still carry
+   the correlation and security headers.
+4. Customer/admin extractors parse `Authorization: Bearer <jwt>`.
+5. The matching JWT validator checks signature, issuer, audience, and expiry.
+6. New customers call `POST /v1/account/provision`; this validates the Supabase JWT and
    creates or returns the ForgeCustomer business customer row for the token subject.
-6. Customer requests resolve `auth_user_id` to a ForgeCustomer business customer row.
-7. `CustomerContext::require_active()` fails closed for missing profiles or suspended
+7. Customer requests resolve `auth_user_id` to a ForgeCustomer business customer row.
+8. `CustomerContext::require_active()` fails closed for missing profiles or suspended
    customers.
-8. Handlers call repositories/services and return either JSON success or the shared error
+9. Handlers call repositories/services and return either JSON success or the shared error
    contract.
 
 ### Route implementation status
 
-Public routes and auth boundaries are active. Many DB-backed mutations remain pending and
-return `NOT_IMPLEMENTED` after auth succeeds. Any new endpoint should follow the same
-pattern until its transaction, audit write, outbox behavior, and tests are complete.
+All routes are fully implemented; auth boundaries (customer vs operator, role-gated
+mutations) are enforced ahead of all data access. Any new endpoint ships with its
+transaction, audit write, outbox behavior, and tests in the same change.
 
 ### Background worker
 
@@ -444,6 +448,11 @@ INTERNAL
 
 Database errors are logged server-side and mapped to `INTERNAL` without leaking database
 details to the client.
+
+Two router-level guards respond before handlers run and return plain (non-enveloped)
+responses: bodies over `MAX_BODY_BYTES` are rejected `413`, and requests exceeding
+`REQUEST_TIMEOUT_SECS` return `503`. Both still carry the correlation and security
+headers.
 
 ### Idempotency and correlation
 
@@ -864,8 +873,8 @@ required variables fail startup. Empty token-verification secrets fail token val
 | `DATAFORGE_SERVICE_TOKEN` | no | empty | DataForge service bearer token. |
 | `ENTITLEMENT_SNAPSHOT_TTL_HOURS` | no | `24` | Snapshot lifetime. |
 | `OFFLINE_GRACE_DAYS` | no | `14` | Offline grace window. |
-| `REQUEST_TIMEOUT_SECS` | no | `30` | Request timeout setting. |
-| `MAX_BODY_BYTES` | no | `1048576` | Maximum request body size setting. |
+| `REQUEST_TIMEOUT_SECS` | no | `30` | Per-request deadline enforced by the router; expiry returns `503`. |
+| `MAX_BODY_BYTES` | no | `1048576` | Request body cap enforced by the router; oversized bodies return `413`. |
 
 `.env.example` is a template only. Real values must come from a secret manager or the
 deployment environment.

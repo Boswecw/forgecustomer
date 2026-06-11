@@ -164,6 +164,11 @@ INTERNAL
 Database errors are logged server-side and mapped to `INTERNAL` without leaking database
 details to the client.
 
+Two router-level guards respond before handlers run and return plain (non-enveloped)
+responses: bodies over `MAX_BODY_BYTES` are rejected `413`, and requests exceeding
+`REQUEST_TIMEOUT_SECS` return `503`. Both still carry the correlation and security
+headers.
+
 ### Idempotency and correlation
 
 - Every response includes `x-correlation-id`.

@@ -25,8 +25,8 @@ required variables fail startup. Empty token-verification secrets fail token val
 | `DATAFORGE_SERVICE_TOKEN` | no | empty | DataForge service bearer token. |
 | `ENTITLEMENT_SNAPSHOT_TTL_HOURS` | no | `24` | Snapshot lifetime. |
 | `OFFLINE_GRACE_DAYS` | no | `14` | Offline grace window. |
-| `REQUEST_TIMEOUT_SECS` | no | `30` | Request timeout setting. |
-| `MAX_BODY_BYTES` | no | `1048576` | Maximum request body size setting. |
+| `REQUEST_TIMEOUT_SECS` | no | `30` | Per-request deadline enforced by the router; expiry returns `503`. |
+| `MAX_BODY_BYTES` | no | `1048576` | Request body cap enforced by the router; oversized bodies return `413`. |
 
 `.env.example` is a template only. Real values must come from a secret manager or the
 deployment environment.

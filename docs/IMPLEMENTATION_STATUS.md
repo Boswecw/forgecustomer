@@ -24,8 +24,8 @@ same change as implementation.
 | 11 | DataForge outbox | ✅ | outbox table + worker (backoff/dead-letter) + sanitizing client; every contract emit site live (customer_created/anonymized, subscription_changed, installation_registered, license_activated/revoked, customer_suspended/restored, quota_threshold_reached, usage_commit_failed) |
 | 12 | Privacy & deletion | ✅ | deletion workflow live end to end: customer request/cancel, operator advance/reject/execute, non-destructive cooling-off, anonymization transaction with receipt + customer_anonymized emit; anonymized accounts fail closed |
 | 18 | RLS | ✅ | enabled on all tables; read-own + public-catalog policies; CI asserts coverage |
-| 19 | Security hardening | 🟡 | JWT issuer/audience/exp, constant-time webhook verify, key rotation, security headers; rate limiting + cargo-audit in CI |
-| 21 | Testing | 🟡 | 85 unit + 20 security integration tests; CI-runnable DB-backed e2e suites deferred (see `tests/README.md`) |
+| 19 | Security hardening | 🟡 | JWT issuer/audience/exp, constant-time webhook verify, key rotation, security headers, request timeout + body-size cap, cargo-audit in CI; rate limiting pending |
+| 21 | Testing | 🟡 | 90 unit + 23 security integration tests; CI-runnable DB-backed e2e suites deferred (see `tests/README.md`) |
 | 22 | Documentation | ✅ | all docs present; kept in-sync with code |
 | 23 | CI | ✅ | fmt, clippy -D warnings, test, migration determinism, RLS assert, OpenAPI lint, secret scan, audit |
 

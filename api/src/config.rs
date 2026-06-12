@@ -35,6 +35,11 @@ pub struct Config {
     pub dataforge_api_url: String,
     pub dataforge_service_token: String,
 
+    /// Server-side secret used for deterministic update-campaign rollout buckets.
+    pub update_rollout_secret: String,
+    /// Optional base URL used when release artifact storage keys are relative paths.
+    pub release_artifact_base_url: String,
+
     pub snapshot_ttl: Duration,
     pub offline_grace: Duration,
     /// How long a deletion request rests in cooling-off before it may be processed.
@@ -131,6 +136,8 @@ impl Config {
             entitlement_signing_key_id: optional("ENTITLEMENT_SIGNING_KEY_ID", "entitlement-key-1"),
             dataforge_api_url: optional("DATAFORGE_API_URL", ""),
             dataforge_service_token: optional("DATAFORGE_SERVICE_TOKEN", ""),
+            update_rollout_secret: optional("UPDATE_ROLLOUT_SECRET", ""),
+            release_artifact_base_url: optional("RELEASE_ARTIFACT_BASE_URL", ""),
             snapshot_ttl: Duration::from_secs(snapshot_ttl_hours * 3600),
             offline_grace: Duration::from_secs(offline_grace_days * 86400),
             deletion_cooling_off: Duration::from_secs(

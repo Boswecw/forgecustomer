@@ -10,11 +10,14 @@ These concepts are **distinct** and never collapsed into one table:
 | Activation    | a link between a license and an installation     |
 | Lease         | a signed temporary offline permission            |
 | Revocation    | an explicit denial record                        |
+| Fleet         | a customer-owned managed population for updates  |
 
 ## Tables (migration `0004_licensing.sql`)
 
 `licenses`, `license_grants`, `installations`, `devices`, `license_activations`,
-`license_leases`, `license_revocations`.
+`license_leases`, `license_revocations`. Migration `0011_fleet_release_update_domain.sql`
+adds default fleets, fleet application policy, installation fleet/update metadata,
+release/artifact state, update campaigns, holds, and minimal update outcome events.
 
 ## Device identity
 
@@ -32,6 +35,9 @@ GET    /v1/installations
 POST   /v1/installations/{id}/activate    links license ↔ installation, enforces device cap
 POST   /v1/installations/{id}/heartbeat   liveness; may refresh reported app_version
 POST   /v1/installations/{id}/deactivate  releases the installation's activations
+POST   /v1/installations/{id}/update-events idempotent bounded update outcome receipt
+GET    /v1/updates/authorforge/{target}/{arch}/{current_version}
+                                           Tauri-compatible dynamic update lookup
 GET    /v1/devices
 GET    /v1/licenses
 ```
@@ -60,6 +66,10 @@ writes a `commercial_audit_event` (`license_issued`, `license_reactivated`,
 
 - Idempotent on `(customer_id, install_key)`; the install key is client-generated
   (8–120 chars of `[A-Za-z0-9._:-]`).
+- The server resolves the customer's default fleet; clients do not send or claim
+  arbitrary fleet ids.
+- Optional update metadata is accepted and bounded: `build_id`, `platform`,
+  `architecture`, `package_format`, and `updater_version`.
 - An optional base64 Ed25519 public key upserts the device row by
   `(customer_id, public_key_fpr)` (fingerprint = SHA-256 hex of the raw key bytes);
   the key is validated to decode to exactly 32 bytes.
@@ -67,7 +77,25 @@ writes a `commercial_audit_event` (`license_issued`, `license_reactivated`,
   device slots are only consumed by activation.
 - Re-registering an existing install key for a *different* product is a `409 CONFLICT`.
 - First registration queues the sanitized `installation_registered` outbox event
-  (no label, no PII).
+  (no label, no PII) with the server-resolved `fleet_id`.
+
+## Update lookup and outcomes
+
+- Public bootstrap distribution is generic and unauthenticated:
+  `GET /v1/products/{product_key}/downloads?platform=linux&arch=x86_64&channel=stable`
+  resolves only published releases with validated `bootstrap` artifacts. It does not
+  embed a customer id, fleet id, install key, or license state in the response.
+- `GET /v1/updates/authorforge/{target}/{arch}/{current_version}` returns `204 No Content`
+  unless every server-side eligibility gate passes: active customer/installation/fleet,
+  active fleet application, published release, validated artifact, matching channel/ring,
+  no campaign hold, matching target/architecture/package, version gates, and deterministic
+  HMAC rollout.
+- The rollout secret is server-side only (`UPDATE_ROLLOUT_SECRET`). Missing rollout or
+  artifact URL configuration is visible as `503`, not a silent hardcoded fallback.
+- Eligible responses use the Tauri updater shape only:
+  `{ version, url, signature, notes, pub_date }`.
+- `POST /v1/installations/{id}/update-events` stores only minimal outcome states with a
+  UUID `Idempotency-Key`; unknown fields and raw diagnostic text are rejected.
 
 ## Activation rules (fail closed)
 

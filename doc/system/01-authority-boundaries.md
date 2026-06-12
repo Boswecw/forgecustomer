@@ -8,7 +8,7 @@ role, and the API must preserve those boundaries even when integrations fail.
 | Authority | Owns | Does not own |
 | --- | --- | --- |
 | Supabase Auth | Login identity, email verification, sessions, refresh tokens, provider identities. | Business customer status, subscriptions, licenses, usage, entitlements. |
-| ForgeCustomer PostgreSQL | Customer profiles, commercial status, subscriptions projection, licenses, installations, devices, entitlements, quotas, usage ledger, audit, deletion workflow. | Raw payment processing, card data, manuscripts, prompts, operational repair findings. |
+| ForgeCustomer PostgreSQL | Customer profiles, commercial status, subscriptions projection, licenses, installations, devices, fleets, release eligibility, update campaigns/outcomes, entitlements, quotas, usage ledger, audit, deletion workflow. | Raw payment processing, card data, manuscripts, prompts, operational repair findings. |
 | Stripe | Payment processing, invoices, payment methods, raw payment events. | Product entitlement truth, device activation, local content access. |
 | DataForge | Sanitized downstream evidence from the outbox. | Customer identity, licensing, subscriptions, billing truth, creative content. |
 | AuthorForge and product clients | Local creative work and local product state. | Commercial authority, entitlement minting, usage-ledger mutation. |

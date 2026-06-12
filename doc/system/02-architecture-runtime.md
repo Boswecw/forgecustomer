@@ -39,7 +39,7 @@ Outbox worker -> DataForge sanitized events
 - Ed25519 signer from `ENTITLEMENT_SIGNING_PRIVATE_KEY`.
 - Published key ring containing the active signing key.
 - Customer JWT validator from Supabase issuer/audience/secret.
-- Admin JWT validator from admin issuer/audience/secret.
+- Admin JWT validator from admin issuer/audience and Forge Command Ed25519 public key.
 - SQLx Postgres pool using `connect_lazy`.
 - Reqwest HTTP client with a 10 second client timeout.
 

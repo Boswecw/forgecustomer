@@ -43,6 +43,9 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
   keys endpoint stays public.
 - Admin input validation: reason bounds, device-limit bounds, adjustment amount
   (finite/non-zero/bounded), period-key shape and window, typed override values.
+- Fleet/update admin input validation: fleet/campaign slugs, release channels, update
+  rings, rollout percentage, release/artifact registration metadata, reason, and
+  idempotency-key requirements.
 - Admin role boundary: operator tokens without the `admin` role are rejected (403) on
   every mutation; reads pass; reason validation rejects before any database write; usage
   adjustments without an idempotency key are rejected.
@@ -57,15 +60,20 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
   rejection behavior.
 - Customer token cannot access admin route.
 - Unauthenticated admin route is rejected.
-- All licensing routes (listings, registration, and parameterized
-  activate/heartbeat/deactivate) and parameterized admin routes fail closed without auth.
-- Valid operator token reaches pending admin handler and returns `NOT_IMPLEMENTED`.
+- All licensing/update routes (listings, registration, update lookup, update events, and
+  parameterized activate/heartbeat/deactivate/update-events) and parameterized admin
+  routes fail closed without auth.
+- Public release distribution routes require no token and reach the data layer without
+  accepting customer, fleet, or personalized artifact input.
+- Valid operator token reaches admin reads and then fails on the unreachable test
+  database, proving auth clears before data access.
 - Public health route requires no token.
 - Error responses include the shared error contract and correlation ID.
 - Domain/service unit tests cover subscription status normalization, entitlement
   precedence, signing and verification, key-ring behavior, quota decisions, device limit
-  checks, offline lease validity, redaction, Stripe webhook verification, DataForge
-  publish hygiene, and outbox backoff.
+  checks, offline lease validity, fleet/update validation, deterministic HMAC rollout
+  vectors, redaction, Stripe webhook verification, DataForge publish hygiene, and outbox
+  backoff.
 
 ### Known implementation gaps
 
@@ -74,6 +82,11 @@ These are intentional MVP gaps and should not be hidden by documentation:
 - End-to-end suites with live or mocked Stripe/Supabase/DataForge flows in CI. The live
   local verification suites (174 checks across licensing, entitlements, usage, admin,
   and deletion against PostgreSQL 16 with a mocked Stripe API) are the blueprint.
+- Release-pipeline package/upload smoke tests that prove an actual installer/updater
+  artifact can be uploaded, registered, and served through the public bootstrap lookup.
+- DB-backed update eligibility matrix tests for held fleets, paused/revoked campaigns,
+  unpublished/quarantined artifacts, cross-customer installation lookups, and duplicate
+  update-event receipts.
 
 ### Release standard
 

@@ -11,6 +11,11 @@ pub struct RegistrationInput<'a> {
     pub install_key: &'a str,
     pub product_key: Option<&'a str>,
     pub app_version: Option<&'a str>,
+    pub build_id: Option<&'a str>,
+    pub platform: Option<&'a str>,
+    pub architecture: Option<&'a str>,
+    pub package_format: Option<&'a str>,
+    pub updater_version: Option<&'a str>,
     pub device_public_key: Option<&'a str>,
     pub device_label: Option<&'a str>,
 }
@@ -21,6 +26,11 @@ pub struct ValidatedRegistration {
     pub install_key: String,
     pub product_key: String,
     pub app_version: Option<String>,
+    pub build_id: Option<String>,
+    pub platform: Option<String>,
+    pub architecture: Option<String>,
+    pub package_format: Option<String>,
+    pub updater_version: Option<String>,
     pub device: Option<ValidatedDevice>,
 }
 
@@ -100,6 +110,71 @@ pub fn clean_app_version(
     Ok(Some(value.to_string()))
 }
 
+fn clean_build_id(value: Option<&str>) -> Result<Option<String>, InstallationValidationError> {
+    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() > 120 {
+        return Err(err("build_id", "must be at most 120 characters"));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+    {
+        return Err(err(
+            "build_id",
+            "must contain only letters, numbers, '.', '-', '_', or ':'",
+        ));
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn clean_platform(value: Option<&str>) -> Result<Option<String>, InstallationValidationError> {
+    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    if matches!(value, "windows" | "linux" | "darwin") {
+        Ok(Some(value.to_string()))
+    } else {
+        Err(err("platform", "must be windows, linux, or darwin"))
+    }
+}
+
+fn clean_architecture(value: Option<&str>) -> Result<Option<String>, InstallationValidationError> {
+    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    if matches!(value, "x86_64" | "aarch64" | "i686" | "armv7") {
+        Ok(Some(value.to_string()))
+    } else {
+        Err(err(
+            "architecture",
+            "must be x86_64, aarch64, i686, or armv7",
+        ))
+    }
+}
+
+fn clean_package_format(
+    value: Option<&str>,
+) -> Result<Option<String>, InstallationValidationError> {
+    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() > 40 {
+        return Err(err("package_format", "must be at most 40 characters"));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        return Err(err(
+            "package_format",
+            "must contain only letters, numbers, '.', '-', or '_'",
+        ));
+    }
+    Ok(Some(value.to_string()))
+}
+
 fn clean_device_label(value: Option<&str>) -> Result<Option<String>, InstallationValidationError> {
     let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
         return Ok(None);
@@ -170,6 +245,11 @@ pub fn validate_registration(
         install_key: clean_install_key(input.install_key)?,
         product_key: clean_product_key(input.product_key)?,
         app_version: clean_app_version(input.app_version)?,
+        build_id: clean_build_id(input.build_id)?,
+        platform: clean_platform(input.platform)?,
+        architecture: clean_architecture(input.architecture)?,
+        package_format: clean_package_format(input.package_format)?,
+        updater_version: clean_app_version(input.updater_version)?,
         device,
     })
 }
@@ -189,6 +269,11 @@ mod tests {
             install_key: "  9f1c2d3e-4b5a-6789-0abc-def012345678 ",
             product_key: None,
             app_version: Some(" 1.4.0-beta.1 "),
+            build_id: Some(" 20260611.abc123 "),
+            platform: Some("linux"),
+            architecture: Some("x86_64"),
+            package_format: Some("appimage"),
+            updater_version: Some("2.0.0"),
             device_public_key: Some(&key),
             device_label: Some("  Work laptop "),
         })
@@ -197,6 +282,11 @@ mod tests {
         assert_eq!(v.install_key, "9f1c2d3e-4b5a-6789-0abc-def012345678");
         assert_eq!(v.product_key, "authorforge");
         assert_eq!(v.app_version.as_deref(), Some("1.4.0-beta.1"));
+        assert_eq!(v.build_id.as_deref(), Some("20260611.abc123"));
+        assert_eq!(v.platform.as_deref(), Some("linux"));
+        assert_eq!(v.architecture.as_deref(), Some("x86_64"));
+        assert_eq!(v.package_format.as_deref(), Some("appimage"));
+        assert_eq!(v.updater_version.as_deref(), Some("2.0.0"));
         let device = v.device.expect("device present");
         assert_eq!(device.public_key, key);
         assert_eq!(device.public_key_fpr.len(), 64); // sha256 hex
@@ -210,6 +300,11 @@ mod tests {
                 install_key: bad,
                 product_key: None,
                 app_version: None,
+                build_id: None,
+                platform: None,
+                architecture: None,
+                package_format: None,
+                updater_version: None,
                 device_public_key: None,
                 device_label: None,
             })
@@ -226,6 +321,11 @@ mod tests {
                 install_key: "valid-install-key",
                 product_key: None,
                 app_version: None,
+                build_id: None,
+                platform: None,
+                architecture: None,
+                package_format: None,
+                updater_version: None,
                 device_public_key: Some(bad),
                 device_label: None,
             })
@@ -249,6 +349,11 @@ mod tests {
             install_key: "valid-install-key",
             product_key: None,
             app_version: None,
+            build_id: None,
+            platform: None,
+            architecture: None,
+            package_format: None,
+            updater_version: None,
             device_public_key: None,
             device_label: Some("Laptop"),
         })
@@ -267,5 +372,29 @@ mod tests {
                 .as_deref(),
             Some("2.0.0+build.5")
         );
+    }
+
+    #[test]
+    fn update_metadata_is_bounded_and_enumerated() {
+        assert_eq!(
+            clean_build_id(Some(" 20260611:abc ")).unwrap().as_deref(),
+            Some("20260611:abc")
+        );
+        assert!(clean_build_id(Some("bad/build")).is_err());
+        assert_eq!(
+            clean_platform(Some("linux")).unwrap().as_deref(),
+            Some("linux")
+        );
+        assert!(clean_platform(Some("freebsd")).is_err());
+        assert_eq!(
+            clean_architecture(Some("x86_64")).unwrap().as_deref(),
+            Some("x86_64")
+        );
+        assert!(clean_architecture(Some("amd64")).is_err());
+        assert_eq!(
+            clean_package_format(Some("appimage")).unwrap().as_deref(),
+            Some("appimage")
+        );
+        assert!(clean_package_format(Some("bad format")).is_err());
     }
 }

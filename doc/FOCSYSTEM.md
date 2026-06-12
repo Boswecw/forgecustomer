@@ -44,7 +44,8 @@ bash doc/system/BUILD.sh
 ## 1. Overview
 
 ForgeCustomer is the customer, commerce, licensing, entitlement, installation, device,
-usage, privacy, and commercial-audit authority for Boswell Digital Solutions products.
+fleet/update, usage, privacy, and commercial-audit authority for Boswell Digital
+Solutions products.
 The first product is AuthorForge, but the catalog and entitlement model are product
 generic.
 
@@ -73,9 +74,10 @@ Implemented today:
 - Subscription-linked license issuance and sync (issue/suspend/expire/reactivate, device
   limit from plan features) inside webhook processing.
 - Installation registration (idempotent by install key, optional Ed25519 device
-  identity), license activation with device-limit and revocation enforcement, heartbeat,
-  deactivation, and read-own installation/device/license listings, with audit and
-  sanitized `installation_registered` / `license_activated` outbox emission.
+  identity), server-resolved default fleet assignment, update metadata capture, license
+  activation with device-limit and revocation enforcement, heartbeat, deactivation, and
+  read-own installation/device/license listings, with audit and sanitized
+  `installation_registered` / `license_activated` outbox emission.
 - Entitlement snapshot assembly from included-plan baseline, subscription plan, license
   grants, promotional grants, and admin overrides — evaluated fail-closed, Ed25519
   signed, stored for audit/replay, and returned with wire field order matching the
@@ -84,8 +86,12 @@ Implemented today:
   for activated installations, denied for suspended/revoked contexts.
 - The Forge Command admin surface: customer lookup, suspend/restore, Stripe subscription
   resync, operator license issue/revoke, entitlement overrides, compensating usage
-  adjustments, and audit reads — mutations role-gated (`admin`), reason-required, and
-  audited with the operator as actor.
+  adjustments, fleet policy, release validation/publication/block, update-campaign
+  controls, fleet holds, update failure reads, artifact quarantine, and audit reads —
+  mutations role-gated (`admin`), reason-required, and audited with the operator as actor.
+- AuthorForge update foundation: fleet/release/artifact/campaign/hold/outcome schema,
+  deterministic HMAC rollout, dynamic Tauri-compatible update lookup, and bounded
+  update-event receipts that reject raw diagnostics.
 - The usage lifecycle: advisory checks, idempotent lock-serialized reservations with
   expiry (lazy + background sweeper), reservation/direct commits on the append-only
   ledger with explainable quota decisions, releases, and per-meter current totals;
@@ -102,7 +108,7 @@ Implemented today:
   decisions, device limits, offline lease validation, redaction, Stripe webhook signature
   verification, and DataForge publish hygiene.
 - Supabase migrations for identity, catalog, commerce, licensing, entitlements, usage,
-  audit/outbox, privacy, RLS, and seed constraints.
+  audit/outbox, privacy, RLS, seed constraints, and fleet/release/update domains.
 - CI for Rust formatting, clippy, tests, migration determinism, RLS coverage, OpenAPI
   linting, schema parsing, secret scan, and dependency audit.
 
@@ -111,6 +117,8 @@ Every customer, webhook, and admin route is implemented; no handler returns
 
 - CI-runnable DB-backed end-to-end suites (the live local verification suites covering
   licensing, entitlements, usage, admin, and deletion are the blueprint).
+- Release-pipeline package/upload smoke tests and DB-backed update eligibility matrix
+  tests.
 
 ### Repository map
 
@@ -159,7 +167,7 @@ role, and the API must preserve those boundaries even when integrations fail.
 | Authority | Owns | Does not own |
 | --- | --- | --- |
 | Supabase Auth | Login identity, email verification, sessions, refresh tokens, provider identities. | Business customer status, subscriptions, licenses, usage, entitlements. |
-| ForgeCustomer PostgreSQL | Customer profiles, commercial status, subscriptions projection, licenses, installations, devices, entitlements, quotas, usage ledger, audit, deletion workflow. | Raw payment processing, card data, manuscripts, prompts, operational repair findings. |
+| ForgeCustomer PostgreSQL | Customer profiles, commercial status, subscriptions projection, licenses, installations, devices, fleets, release eligibility, update campaigns/outcomes, entitlements, quotas, usage ledger, audit, deletion workflow. | Raw payment processing, card data, manuscripts, prompts, operational repair findings. |
 | Stripe | Payment processing, invoices, payment methods, raw payment events. | Product entitlement truth, device activation, local content access. |
 | DataForge | Sanitized downstream evidence from the outbox. | Customer identity, licensing, subscriptions, billing truth, creative content. |
 | AuthorForge and product clients | Local creative work and local product state. | Commercial authority, entitlement minting, usage-ledger mutation. |
@@ -244,7 +252,7 @@ Outbox worker -> DataForge sanitized events
 - Ed25519 signer from `ENTITLEMENT_SIGNING_PRIVATE_KEY`.
 - Published key ring containing the active signing key.
 - Customer JWT validator from Supabase issuer/audience/secret.
-- Admin JWT validator from admin issuer/audience/secret.
+- Admin JWT validator from admin issuer/audience and Forge Command Ed25519 public key.
 - SQLx Postgres pool using `connect_lazy`.
 - Reqwest HTTP client with a 10 second client timeout.
 
@@ -300,6 +308,8 @@ The HTTP API uses JSON over HTTPS with base path `/v1`. The machine-readable con
 | `GET /v1/version` | implemented | Service name, crate version, `GIT_SHA`, and `APP_ENV`. |
 | `GET /v1/products` | implemented | Active product catalog rows. |
 | `GET /v1/plans` | implemented | Active plan rows. |
+| `GET /v1/products/{product_key}/releases/latest` | implemented | Latest published release metadata for a channel. |
+| `GET /v1/products/{product_key}/downloads` | implemented | Generic bootstrap artifact lookup for the latest published release. |
 | `GET /v1/entitlements/keys` | implemented | Published Ed25519 verification keys. |
 | `POST /v1/webhooks/stripe` | implemented processing layer | Verifies Stripe signature, parses a minimal event envelope, stores/dedupes by Stripe event id, ignores unsupported events, and transactionally applies supported checkout/subscription/invoice state with audit + outbox + subscription-linked license sync. |
 
@@ -321,6 +331,8 @@ Current route surface:
 - `POST /v1/installations/{id}/activate`
 - `POST /v1/installations/{id}/heartbeat`
 - `POST /v1/installations/{id}/deactivate`
+- `POST /v1/installations/{id}/update-events`
+- `GET /v1/updates/authorforge/{target}/{arch}/{current_version}`
 - `GET /v1/devices`
 - `GET /v1/entitlements/current`
 - `POST /v1/entitlements/check`
@@ -364,13 +376,19 @@ answers an advisory feature or quota question read-only and fail-closed.
 document for an activated installation and refuses suspended, non-active-license, and
 revoked contexts.
 
-The licensing surface is implemented: `POST /v1/installations` registers idempotently by
-client install key (optionally registering an Ed25519 device public key);
+The licensing/update surface is implemented: `POST /v1/installations` registers
+idempotently by client install key, assigns the server-resolved default fleet, records
+bounded update metadata, and optionally registers an Ed25519 device public key;
 `POST /v1/installations/{id}/activate` links a license to the installation under a row
 lock, enforcing the device limit and explicit revocations and failing closed on
 non-active licenses; heartbeat records liveness; deactivate releases the installation's
 activations; and the `GET` listings return the caller's own installations, devices, and
-licenses (with active device counts).
+licenses (with active device counts). `GET /v1/updates/authorforge/{target}/{arch}/{current_version}`
+is the Tauri-compatible dynamic update endpoint; it resolves fleet from the owned
+installation, applies campaign/release/artifact/version/hold/HMAC-rollout gates, returns
+`204` for no eligible update, and returns only `{ version, url, signature, notes,
+pub_date }` when eligible. `POST /v1/installations/{id}/update-events` stores only
+bounded update outcome receipts keyed by UUID `Idempotency-Key`.
 
 `POST /v1/checkout` is implemented for active customers. It resolves the active paid
 catalog plan server-side, creates a Stripe Checkout Session, stores the returned Stripe
@@ -397,6 +415,26 @@ Current route surface:
 - `POST /v1/admin/entitlements/override`
 - `POST /v1/admin/usage/adjust`
 - `GET /v1/admin/audit`
+- `GET /v1/admin/fleets`
+- `GET /v1/admin/fleets/{id}`
+- `POST /v1/admin/fleets/{id}/policy`
+- `GET /v1/admin/releases`
+- `POST /v1/admin/releases`
+- `GET /v1/admin/releases/{id}`
+- `POST /v1/admin/releases/{id}/artifacts`
+- `POST /v1/admin/releases/{id}/validate`
+- `POST /v1/admin/releases/{id}/publish`
+- `POST /v1/admin/releases/{id}/block`
+- `POST /v1/admin/update-campaigns`
+- `GET /v1/admin/update-campaigns/{id}`
+- `POST /v1/admin/update-campaigns/{id}/pause`
+- `POST /v1/admin/update-campaigns/{id}/resume`
+- `POST /v1/admin/update-campaigns/{id}/revoke`
+- `POST /v1/admin/update-campaigns/{id}/rollout`
+- `POST /v1/admin/update-campaigns/{campaign_id}/holds`
+- `DELETE /v1/admin/update-campaigns/{campaign_id}/holds/{fleet_id}`
+- `GET /v1/admin/update-failures`
+- `POST /v1/admin/release-artifacts/{id}/quarantine`
 - `GET /v1/admin/deletion-requests`
 - `POST /v1/admin/deletion-requests/{id}/advance`
 - `POST /v1/admin/deletion-requests/{id}/reject`
@@ -407,7 +445,12 @@ require any valid operator token; mutations require the `admin` role and a writt
 reason, write operator-actor commercial audit, preserve append-only ledgers (usage
 corrections are compensating `adjustment` events behind a required idempotency key), and
 queue the contract-defined outbox events (`customer_suspended`, `customer_restored`,
-`license_revoked`). Subscription resync pulls current truth from the Stripe API,
+`license_revoked`). Fleet/release/campaign mutations also write operator audit and
+require idempotency keys for retryable commands. Release validation requires validated
+artifact proof; release and immutable artifact metadata can be registered by the
+release pipeline through audited admin endpoints before validation/publication. Artifact
+quarantine pauses campaigns targeting the affected release.
+Subscription resync pulls current truth from the Stripe API,
 reprojects it, syncs the linked license, and advances the event watermark so stale
 out-of-order webhooks are subsequently skipped. Suspend/restore and revoke are
 idempotent and report `changed: false` on replay.
@@ -489,12 +532,15 @@ schema is additive and deterministic under `supabase/migrations`.
 | `0008_privacy.sql` | Privacy and deletion | `policy_versions`, `consent_records`, `account_deletion_requests` |
 | `0009_rls.sql` | Row-level security | Enables and forces RLS; creates own-row and public-catalog policies. |
 | `0010_seed_constraints.sql` | Determinism and indexes | Adds seed/constraint hardening and operational indexes. |
+| `0011_fleet_release_update_domain.sql` | Fleet, release, and update campaigns | `fleets`, `fleet_applications`, installation update metadata, `product_releases`, `release_artifacts`, `update_campaigns`, `update_campaign_holds`, `installation_update_events` |
 
 ### RLS posture
 
 RLS is enabled and forced across public tables. Customer-facing records are scoped by the
 business `customer_id`, not only by the Supabase auth subject. Catalog tables are public
-read. CI asserts that all public tables have RLS enabled.
+read. Published release metadata/artifacts have public read policies; fleet/application
+and update-event records are scoped to the owning customer. CI asserts that all public
+tables have RLS enabled.
 
 The API still owns privileged writes. RLS is defense in depth, not a substitute for the
 server-side authorization model.
@@ -505,6 +551,7 @@ Append-only tables are part of the commercial trust boundary:
 
 - `usage_events`
 - `commercial_audit_events`
+- `installation_update_events`
 - webhook/event receipt tables where replay protection matters
 - outbox delivery records, except operational status fields required for retry/dead-letter
 
@@ -591,6 +638,33 @@ Implemented behavior:
   registration and activation also queue sanitized outbox events.
 - Offline leases are time-bound and denied for suspended or revoked contexts; lease
   issuance wiring lands with the entitlement snapshot work.
+
+### Fleets, releases, and updates
+
+ForgeCustomer owns fleet assignment and update eligibility. Clients may identify their
+owned installation, current version/build, platform, architecture, package format, and
+updater version, but they may not claim an arbitrary fleet.
+
+Implemented behavior:
+
+- Account provisioning and installation registration create/resolve a default active
+  fleet and AuthorForge fleet application policy.
+- Release-pipeline intake registers draft release metadata idempotently by
+  product/version/build, then registers immutable bootstrap/updater/recovery artifact
+  metadata after upload/checksum/signature proof.
+- Release publication is operator-controlled: validation requires at least one validated
+  artifact, and publication requires validated release state.
+- Public website/bootstrap lookup exposes only published releases with validated generic
+  bootstrap artifacts; it never embeds customer, fleet, or personalized license state.
+- Campaigns are created at `0%` rollout and move through explicit audited controls
+  (`pause`, `resume`, `revoke`, rollout changes, and fleet holds).
+- Dynamic update lookup returns `204` unless every gate passes: active installation/fleet,
+  active fleet application, published release, validated artifact, matching channel/ring,
+  no fleet hold, matching target/architecture/package, version requirements, and the
+  deterministic server-side HMAC rollout bucket.
+- Update outcome receipts store only bounded enum/code/version/build fields with UUID
+  idempotency. Raw diagnostics, stack traces, hostnames, paths, logs, and creative
+  content are rejected.
 
 ### Entitlements
 
@@ -793,7 +867,8 @@ Customer tokens:
 Admin tokens:
 
 - Separate operator issuer and audience.
-- Separate secret from customer tokens.
+- Ed25519 public-key verification against Forge Command's Token Authority key; no shared
+  admin secret.
 - A customer token cannot authorize an admin route.
 
 If a JWT secret is absent, the validator is marked unconfigured and rejects tokens. That
@@ -809,6 +884,7 @@ Server-side only:
 - `STRIPE_WEBHOOK_SECRET`
 - `ENTITLEMENT_SIGNING_PRIVATE_KEY`
 - `DATAFORGE_SERVICE_TOKEN`
+- `UPDATE_ROLLOUT_SECRET`
 
 Secrets must not appear in clients, logs, docs examples with real values, outbox payloads,
 or repo history.
@@ -846,6 +922,8 @@ Forged snapshots must fail verification. Private signing keys must never be logg
 - Suspended customers receive no privileged product actions.
 - Revoked devices receive no new activations/leases.
 - Ambiguous entitlement state denies cloud/new lease access.
+- Missing update rollout/artifact URL configuration is visible as `503`; normal
+  ineligibility returns `204` without leaking internal campaign state.
 - Local creative access must remain available despite cloud, billing, or DataForge
   outages.
 - DataForge outage degrades to queued outbox delivery, not failed customer transactions.
@@ -877,6 +955,8 @@ required variables fail startup. Empty token-verification secrets fail token val
 | `ENTITLEMENT_SIGNING_KEY_ID` | no | `entitlement-key-1` | Published signing key ID. |
 | `DATAFORGE_API_URL` | no | empty | Enables outbox worker when set. |
 | `DATAFORGE_SERVICE_TOKEN` | no | empty | DataForge service bearer token. |
+| `UPDATE_ROLLOUT_SECRET` | required for update lookup | empty | Server-side HMAC secret for deterministic campaign rollout buckets. Empty returns `503` from the update endpoint. |
+| `RELEASE_ARTIFACT_BASE_URL` | required for relative artifact keys | empty | Prefix used when `release_artifacts.storage_key` is not already an absolute URL. |
 | `ENTITLEMENT_SNAPSHOT_TTL_HOURS` | no | `24` | Snapshot lifetime. |
 | `OFFLINE_GRACE_DAYS` | no | `14` | Offline grace window. |
 | `REQUEST_TIMEOUT_SECS` | no | `30` | Per-request deadline enforced by the router; expiry returns `503`. |
@@ -980,6 +1060,9 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
   keys endpoint stays public.
 - Admin input validation: reason bounds, device-limit bounds, adjustment amount
   (finite/non-zero/bounded), period-key shape and window, typed override values.
+- Fleet/update admin input validation: fleet/campaign slugs, release channels, update
+  rings, rollout percentage, release/artifact registration metadata, reason, and
+  idempotency-key requirements.
 - Admin role boundary: operator tokens without the `admin` role are rejected (403) on
   every mutation; reads pass; reason validation rejects before any database write; usage
   adjustments without an idempotency key are rejected.
@@ -994,15 +1077,20 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
   rejection behavior.
 - Customer token cannot access admin route.
 - Unauthenticated admin route is rejected.
-- All licensing routes (listings, registration, and parameterized
-  activate/heartbeat/deactivate) and parameterized admin routes fail closed without auth.
-- Valid operator token reaches pending admin handler and returns `NOT_IMPLEMENTED`.
+- All licensing/update routes (listings, registration, update lookup, update events, and
+  parameterized activate/heartbeat/deactivate/update-events) and parameterized admin
+  routes fail closed without auth.
+- Public release distribution routes require no token and reach the data layer without
+  accepting customer, fleet, or personalized artifact input.
+- Valid operator token reaches admin reads and then fails on the unreachable test
+  database, proving auth clears before data access.
 - Public health route requires no token.
 - Error responses include the shared error contract and correlation ID.
 - Domain/service unit tests cover subscription status normalization, entitlement
   precedence, signing and verification, key-ring behavior, quota decisions, device limit
-  checks, offline lease validity, redaction, Stripe webhook verification, DataForge
-  publish hygiene, and outbox backoff.
+  checks, offline lease validity, fleet/update validation, deterministic HMAC rollout
+  vectors, redaction, Stripe webhook verification, DataForge publish hygiene, and outbox
+  backoff.
 
 ### Known implementation gaps
 
@@ -1011,6 +1099,11 @@ These are intentional MVP gaps and should not be hidden by documentation:
 - End-to-end suites with live or mocked Stripe/Supabase/DataForge flows in CI. The live
   local verification suites (174 checks across licensing, entitlements, usage, admin,
   and deletion against PostgreSQL 16 with a mocked Stripe API) are the blueprint.
+- Release-pipeline package/upload smoke tests that prove an actual installer/updater
+  artifact can be uploaded, registered, and served through the public bootstrap lookup.
+- DB-backed update eligibility matrix tests for held fleets, paused/revoked campaigns,
+  unpublished/quarantined artifacts, cross-customer installation lookups, and duplicate
+  update-event receipts.
 
 ### Release standard
 

@@ -23,6 +23,8 @@ required variables fail startup. Empty token-verification secrets fail token val
 | `ENTITLEMENT_SIGNING_KEY_ID` | no | `entitlement-key-1` | Published signing key ID. |
 | `DATAFORGE_API_URL` | no | empty | Enables outbox worker when set. |
 | `DATAFORGE_SERVICE_TOKEN` | no | empty | DataForge service bearer token. |
+| `UPDATE_ROLLOUT_SECRET` | required for update lookup | empty | Server-side HMAC secret for deterministic campaign rollout buckets. Empty returns `503` from the update endpoint. |
+| `RELEASE_ARTIFACT_BASE_URL` | required for relative artifact keys | empty | Prefix used when `release_artifacts.storage_key` is not already an absolute URL. |
 | `ENTITLEMENT_SNAPSHOT_TTL_HOURS` | no | `24` | Snapshot lifetime. |
 | `OFFLINE_GRACE_DAYS` | no | `14` | Offline grace window. |
 | `REQUEST_TIMEOUT_SECS` | no | `30` | Per-request deadline enforced by the router; expiry returns `503`. |

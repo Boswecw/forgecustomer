@@ -43,6 +43,24 @@
 3. Switch `ENTITLEMENT_SIGNING_KEY_ID` / `ENTITLEMENT_SIGNING_PRIVATE_KEY` to the new key.
 4. After max snapshot/lease lifetime + grace, retire the old key from the endpoint.
 
+## AuthorForge updates
+
+- Set `UPDATE_ROLLOUT_SECRET` before enabling update campaigns. Missing configuration
+  returns `503` from the dynamic update endpoint.
+- Set `RELEASE_ARTIFACT_BASE_URL` when `release_artifacts.storage_key` is relative;
+  absolute `https://` storage keys are used directly.
+- Register a release shell from the pipeline with `POST /v1/admin/releases` and a stable
+  `Idempotency-Key`; replays return the same release row.
+- Register uploaded artifact metadata with `POST /v1/admin/releases/{id}/artifacts`
+  after checksum/signature/package evidence is verified. `updater` artifacts require a
+  Tauri signature; conflicting immutable metadata is rejected.
+- Website/bootstrap clients use `GET /v1/products/{product_key}/downloads`; it returns
+  only a published release's validated generic `bootstrap` artifact.
+- Dynamic lookup: `GET /v1/updates/authorforge/{target}/{arch}/{current_version}` with
+  `X-Forge-Installation-ID`. No eligible update returns `204`.
+- Outcome receipts: `POST /v1/installations/{id}/update-events` with a UUID
+  `Idempotency-Key`.
+
 ## Outbox / DataForge
 
 - The outbox worker publishes sanitized events with retry+backoff. A DataForge outage does
@@ -70,6 +88,12 @@
 | Issue / revoke license  | `POST /v1/admin/licenses` / `.../revoke`         |
 | Override entitlement    | `POST /v1/admin/entitlements/override`           |
 | Adjust usage            | `POST /v1/admin/usage/adjust` (compensating)     |
+| Update fleet policy     | `POST /v1/admin/fleets/{id}/policy`              |
+| Register release        | `POST /v1/admin/releases`                        |
+| Register artifact       | `POST /v1/admin/releases/{id}/artifacts`         |
+| Validate/publish release| `POST /v1/admin/releases/{id}/validate|publish`  |
+| Control campaign        | `POST /v1/admin/update-campaigns/{id}/pause|resume|rollout|revoke` |
+| Quarantine artifact     | `POST /v1/admin/release-artifacts/{id}/quarantine` |
 | Read audit              | `GET /v1/admin/audit`                            |
 
 Every admin mutation requires a reason and writes a `commercial_audit_event`.

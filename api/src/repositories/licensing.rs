@@ -55,9 +55,15 @@ pub enum ActivationError {
 #[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
 pub struct InstallationRow {
     pub id: Uuid,
+    pub fleet_id: Option<Uuid>,
     pub install_key: String,
     pub product_key: String,
     pub app_version: Option<String>,
+    pub build_id: Option<String>,
+    pub platform: Option<String>,
+    pub architecture: Option<String>,
+    pub package_format: Option<String>,
+    pub updater_version: Option<String>,
     pub status: String,
     pub device_id: Option<Uuid>,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
@@ -177,22 +183,82 @@ pub async fn register_installation(
         None => None,
     };
 
+    let fleet_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        with inserted as (
+          insert into public.fleets (customer_id, display_name, fleet_type, status, update_ring, release_channel_id)
+          values (
+            $1,
+            'Default fleet',
+            'default',
+            'active',
+            'standard',
+            (
+              select rc.id
+              from public.release_channels rc
+              join public.products p on p.id = rc.product_id
+              where p.key = $2 and rc.key = 'stable'
+              limit 1
+            )
+          )
+          on conflict do nothing
+          returning id
+        )
+        select id from inserted
+        union all
+        select id from public.fleets
+        where customer_id = $1 and fleet_type = 'default' and status <> 'deleted'
+        limit 1
+        "#,
+    )
+    .bind(customer_id)
+    .bind(&product.1)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        insert into public.fleet_applications (fleet_id, product_id, status, update_ring, release_channel_id)
+        values (
+          $1,
+          $2,
+          'active',
+          'standard',
+          (select rc.id from public.release_channels rc
+           where rc.product_id = $2 and rc.key = 'stable' limit 1)
+        )
+        on conflict (fleet_id, product_id) do nothing
+        "#,
+    )
+    .bind(fleet_id)
+    .bind(product.0)
+    .execute(&mut *tx)
+    .await?;
+
     let inserted = sqlx::query_as::<_, InstallationRow>(
         r#"
         insert into public.installations
-            (customer_id, device_id, install_key, product_id, app_version)
+            (customer_id, device_id, fleet_id, install_key, product_id, app_version,
+             build_id, platform, architecture, package_format, updater_version)
         values
-            ($1, $2, $3, $4, $5)
+            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         on conflict (customer_id, install_key) do nothing
-        returning id, install_key, $6::text as product_key, app_version, status, device_id,
+        returning id, fleet_id, install_key, $12::text as product_key, app_version, build_id,
+                  platform, architecture, package_format, updater_version, status, device_id,
                   last_heartbeat_at, created_at
         "#,
     )
     .bind(customer_id)
     .bind(device_id)
+    .bind(fleet_id)
     .bind(&input.install_key)
     .bind(product.0)
     .bind(input.app_version.as_deref())
+    .bind(input.build_id.as_deref())
+    .bind(input.platform.as_deref())
+    .bind(input.architecture.as_deref())
+    .bind(input.package_format.as_deref())
+    .bind(input.updater_version.as_deref())
     .bind(&product.1)
     .fetch_optional(&mut *tx)
     .await?;
@@ -206,6 +272,7 @@ pub async fn register_installation(
                 json!({
                     "customer_id": customer_id,
                     "installation_id": installation.id,
+                    "fleet_id": installation.fleet_id,
                     "product": product.1,
                     "has_device": device_id.is_some(),
                     "occurred_at": Utc::now(),
@@ -239,16 +306,29 @@ pub async fn register_installation(
                 update public.installations
                 set status = 'active',
                     app_version = coalesce($2, app_version),
-                    device_id = coalesce($3, device_id)
+                    device_id = coalesce($3, device_id),
+                    fleet_id = coalesce(fleet_id, $5),
+                    build_id = coalesce($6, build_id),
+                    platform = coalesce($7, platform),
+                    architecture = coalesce($8, architecture),
+                    package_format = coalesce($9, package_format),
+                    updater_version = coalesce($10, updater_version)
                 where id = $1
-                returning id, install_key, $4::text as product_key, app_version, status,
-                          device_id, last_heartbeat_at, created_at
+                returning id, fleet_id, install_key, $4::text as product_key, app_version,
+                          build_id, platform, architecture, package_format, updater_version,
+                          status, device_id, last_heartbeat_at, created_at
                 "#,
             )
             .bind(prior.0)
             .bind(input.app_version.as_deref())
             .bind(device_id)
             .bind(&product.1)
+            .bind(fleet_id)
+            .bind(input.build_id.as_deref())
+            .bind(input.platform.as_deref())
+            .bind(input.architecture.as_deref())
+            .bind(input.package_format.as_deref())
+            .bind(input.updater_version.as_deref())
             .fetch_one(&mut *tx)
             .await?;
             RegisteredInstallation {
@@ -562,8 +642,9 @@ pub async fn list_installations(
 ) -> Result<Vec<InstallationRow>, sqlx::Error> {
     sqlx::query_as::<_, InstallationRow>(
         r#"
-        select i.id, i.install_key, p.key as product_key, i.app_version, i.status,
-               i.device_id, i.last_heartbeat_at, i.created_at
+        select i.id, i.fleet_id, i.install_key, p.key as product_key, i.app_version,
+               i.build_id, i.platform, i.architecture, i.package_format, i.updater_version,
+               i.status, i.device_id, i.last_heartbeat_at, i.created_at
         from public.installations i
         join public.products p on p.id = i.product_id
         where i.customer_id = $1

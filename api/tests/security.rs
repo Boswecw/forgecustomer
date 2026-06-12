@@ -56,6 +56,11 @@ fn test_config() -> Config {
     std::env::set_var("MAX_BODY_BYTES", "2048");
     std::env::set_var("REQUEST_TIMEOUT_SECS", "30");
     std::env::set_var("RATE_LIMIT_PER_MINUTE", "300");
+    std::env::set_var("UPDATE_ROLLOUT_SECRET", "security-test-rollout-secret");
+    std::env::set_var(
+        "RELEASE_ARTIFACT_BASE_URL",
+        "https://downloads.example.test/authorforge",
+    );
     Config::from_env().expect("config")
 }
 
@@ -147,6 +152,15 @@ async fn valid_operator_token_clears_admin_auth() {
     // Auth passes (NOT 401/403); the listing then fails on the unreachable test
     // database, proving the boundary sits in front of the data access.
     assert_eq!(status_of(req).await, StatusCode::INTERNAL_SERVER_ERROR);
+
+    let token = admin_jwt(json!({ "sub": "operator-7", "roles": ["support"],
+        "iss": ADMIN_ISS, "aud": ADMIN_AUD, "exp": now() + 3600 }));
+    let req = Request::builder()
+        .uri("/v1/admin/fleets")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(status_of(req).await, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[tokio::test]
@@ -160,6 +174,19 @@ async fn admin_mutations_require_admin_role() {
         format!("/v1/admin/customers/{id}/restore"),
         format!("/v1/admin/subscriptions/{id}/resync"),
         format!("/v1/admin/licenses/{id}/revoke"),
+        format!("/v1/admin/fleets/{id}/policy"),
+        "/v1/admin/releases".to_string(),
+        format!("/v1/admin/releases/{id}/artifacts"),
+        format!("/v1/admin/releases/{id}/validate"),
+        format!("/v1/admin/releases/{id}/publish"),
+        format!("/v1/admin/releases/{id}/block"),
+        "/v1/admin/update-campaigns".to_string(),
+        format!("/v1/admin/update-campaigns/{id}/pause"),
+        format!("/v1/admin/update-campaigns/{id}/resume"),
+        format!("/v1/admin/update-campaigns/{id}/revoke"),
+        format!("/v1/admin/update-campaigns/{id}/rollout"),
+        format!("/v1/admin/update-campaigns/{id}/holds"),
+        format!("/v1/admin/release-artifacts/{id}/quarantine"),
         format!("/v1/admin/deletion-requests/{id}/advance"),
         format!("/v1/admin/deletion-requests/{id}/reject"),
         format!("/v1/admin/deletion-requests/{id}/execute"),
@@ -175,7 +202,27 @@ async fn admin_mutations_require_admin_role() {
             "meter_key": "cloud_tokens",
             "amount": -100,
             "feature_key": "authorforge.cloud.enabled",
-            "value": true
+            "value": true,
+            "display_name": "Default fleet",
+            "update_ring": "standard",
+            "release_channel": "stable",
+            "product_key": "authorforge",
+            "version": "1.0.1",
+            "build_id": "20260612.abcd",
+            "platform": "linux",
+            "architecture": "x86_64",
+            "package_format": "appimage",
+            "artifact_role": "bootstrap",
+            "storage_key": "authorforge/1.0.1/linux-x86_64.appimage",
+            "size_bytes": 123,
+            "sha256": "a".repeat(64),
+            "tauri_signature": "tauri-signature",
+            "signing_key_id": "tauri-key-1",
+            "os_signature_status": "verified",
+            "target_release_id": id,
+            "campaign_slug": "authorforge-test-campaign",
+            "rollout_percentage": 0,
+            "fleet_id": id
         });
         let req = Request::builder()
             .method("POST")
@@ -187,6 +234,17 @@ async fn admin_mutations_require_admin_role() {
             .unwrap();
         assert_eq!(status_of(req).await, StatusCode::FORBIDDEN, "{uri}");
     }
+
+    let body = json!({ "reason": "support cleanup" });
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(format!("/v1/admin/update-campaigns/{id}/holds/{id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .header("idempotency-key", "role-check-delete-1")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    assert_eq!(status_of(req).await, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -234,6 +292,84 @@ async fn admin_usage_adjust_requires_idempotency_key() {
 }
 
 #[tokio::test]
+async fn fleet_update_admin_mutations_require_idempotency_key() {
+    let token = admin_jwt(json!({ "sub": "operator-7", "roles": ["admin"],
+        "iss": ADMIN_ISS, "aud": ADMIN_AUD, "exp": now() + 3600 }));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/admin/releases/9f1c2d3e-4b5a-6789-0abc-def012345678/publish")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "reason": "publish validated release" }).to_string(),
+        ))
+        .unwrap();
+    assert_eq!(status_of(req).await, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn fleet_update_admin_mutations_validate_before_db_write() {
+    let token = admin_jwt(json!({ "sub": "operator-7", "roles": ["admin"],
+        "iss": ADMIN_ISS, "aud": ADMIN_AUD, "exp": now() + 3600 }));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/admin/update-campaigns/9f1c2d3e-4b5a-6789-0abc-def012345678/rollout")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .header("idempotency-key", "bad-rollout-1")
+        .body(Body::from(
+            json!({ "reason": "raise rollout", "rollout_percentage": 101 }).to_string(),
+        ))
+        .unwrap();
+
+    let app = build_router(test_state());
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "VALIDATION_FAILED");
+    assert_eq!(body["error"]["details"]["field"], "rollout_percentage");
+}
+
+#[tokio::test]
+async fn release_pipeline_admin_mutations_validate_before_db_write() {
+    let token = admin_jwt(json!({ "sub": "operator-7", "roles": ["admin"],
+        "iss": ADMIN_ISS, "aud": ADMIN_AUD, "exp": now() + 3600 }));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/admin/releases/9f1c2d3e-4b5a-6789-0abc-def012345678/artifacts")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .header("idempotency-key", "bad-artifact-1")
+        .body(Body::from(
+            json!({
+                "reason": "register artifact",
+                "platform": "linux",
+                "architecture": "x86_64",
+                "package_format": "appimage",
+                "artifact_role": "bootstrap",
+                "storage_key": "authorforge/1.0.1/linux-x86_64.appimage",
+                "size_bytes": 123,
+                "sha256": "not-a-digest",
+                "signing_key_id": "tauri-key-1",
+                "os_signature_status": "verified"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let app = build_router(test_state());
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"]["code"], "VALIDATION_FAILED");
+    assert_eq!(body["error"]["details"]["field"], "sha256");
+}
+
+#[tokio::test]
 async fn operator_scope_admin_satisfies_mutation_gate() {
     // Forge Command's Token Authority issues `scope` (not `roles`); scope "admin" must
     // satisfy the admin role gate. Auth + role + reason pass, then the unreachable DB 500s.
@@ -261,6 +397,21 @@ async fn public_health_needs_no_token() {
         .body(Body::empty())
         .unwrap();
     assert_eq!(status_of(req).await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn public_release_distribution_routes_need_no_token() {
+    let req = Request::builder()
+        .uri("/v1/products/authorforge/releases/latest?channel=stable")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(status_of(req).await, StatusCode::INTERNAL_SERVER_ERROR);
+
+    let req = Request::builder()
+        .uri("/v1/products/authorforge/downloads?platform=linux&arch=x86_64")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(status_of(req).await, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[tokio::test]
@@ -303,7 +454,12 @@ async fn account_provision_validates_customer_profile_input_before_db_write() {
 #[tokio::test]
 async fn licensing_routes_require_customer_auth() {
     // Listing endpoints.
-    for uri in ["/v1/licenses", "/v1/installations", "/v1/devices"] {
+    for uri in [
+        "/v1/licenses",
+        "/v1/installations",
+        "/v1/devices",
+        "/v1/updates/authorforge/windows/x86_64/1.0.0",
+    ] {
         let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
         assert_eq!(status_of(req).await, StatusCode::UNAUTHORIZED, "{uri}");
     }
@@ -322,7 +478,7 @@ async fn parameterized_installation_routes_match_and_require_auth() {
     // A 401 (not 404) proves the parameterized route matches AND fails closed without
     // auth. This guards the axum 0.7 `:id` path syntax.
     let id = "9f1c2d3e-4b5a-6789-0abc-def012345678";
-    for action in ["activate", "heartbeat", "deactivate"] {
+    for action in ["activate", "heartbeat", "deactivate", "update-events"] {
         let req = Request::builder()
             .method("POST")
             .uri(format!("/v1/installations/{id}/{action}"))
@@ -428,6 +584,17 @@ async fn parameterized_admin_routes_match_and_require_auth() {
         format!("/v1/admin/customers/{id}/restore"),
         format!("/v1/admin/subscriptions/{id}/resync"),
         format!("/v1/admin/licenses/{id}/revoke"),
+        format!("/v1/admin/fleets/{id}/policy"),
+        format!("/v1/admin/releases/{id}/artifacts"),
+        format!("/v1/admin/releases/{id}/validate"),
+        format!("/v1/admin/releases/{id}/publish"),
+        format!("/v1/admin/releases/{id}/block"),
+        format!("/v1/admin/update-campaigns/{id}/pause"),
+        format!("/v1/admin/update-campaigns/{id}/resume"),
+        format!("/v1/admin/update-campaigns/{id}/revoke"),
+        format!("/v1/admin/update-campaigns/{id}/rollout"),
+        format!("/v1/admin/update-campaigns/{id}/holds"),
+        format!("/v1/admin/release-artifacts/{id}/quarantine"),
     ] {
         let req = Request::builder()
             .method("POST")
@@ -436,6 +603,26 @@ async fn parameterized_admin_routes_match_and_require_auth() {
             .unwrap();
         assert_eq!(status_of(req).await, StatusCode::UNAUTHORIZED, "{uri}");
     }
+
+    for uri in [
+        format!("/v1/admin/fleets/{id}"),
+        format!("/v1/admin/releases/{id}"),
+        format!("/v1/admin/update-campaigns/{id}"),
+    ] {
+        let req = Request::builder()
+            .method("GET")
+            .uri(&uri)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(status_of(req).await, StatusCode::UNAUTHORIZED, "{uri}");
+    }
+
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(format!("/v1/admin/update-campaigns/{id}/holds/{id}"))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(status_of(req).await, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

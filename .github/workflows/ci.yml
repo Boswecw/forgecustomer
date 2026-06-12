@@ -62,6 +62,8 @@ jobs:
           test "$(cat /tmp/unprotected)" = "0"
       - name: Assert AuthorForge update eligibility matrix
         run: $PSQL -d fc -f supabase/tests/update_eligibility_matrix.sql
+      - name: Assert customer RLS write-denial matrix
+        run: $PSQL -d fc -f supabase/tests/rls_customer_write_denial.sql
       - name: Assert append-only ledgers reject UPDATE
         run: |
           set +e

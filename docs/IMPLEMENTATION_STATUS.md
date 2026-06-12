@@ -24,9 +24,9 @@ same change as implementation.
 | 11 | DataForge outbox | ✅ | outbox table + worker (backoff/dead-letter) + sanitizing client; every contract emit site live (customer_created/anonymized, subscription_changed, installation_registered, license_activated/revoked, customer_suspended/restored, quota_threshold_reached, usage_commit_failed) |
 | 12 | Privacy & deletion | ✅ | deletion workflow live end to end: customer request/cancel, operator advance/reject/execute, non-destructive cooling-off, anonymization transaction with receipt + customer_anonymized emit; anonymized accounts fail closed |
 | 13 | Fleet/update foundation | ✅ | default fleet/backfill/RLS, release/artifact/campaign/hold/outcome tables, release/artifact registration, public bootstrap lookup, admin control API, deterministic rollout, Tauri update lookup, bounded update-event receipts, CI DB-backed eligibility matrix, release package publication smoke proof, and HTTP update-campaign smoke proof live |
-| 18 | RLS | ✅ | enabled on all tables; read-own + public-catalog policies; CI asserts coverage |
+| 18 | RLS | ✅ | enabled on all tables; read-own + public-catalog policies; CI asserts coverage and customer write denial |
 | 19 | Security hardening | ✅ | JWT issuer/audience/exp, constant-time webhook verify, key rotation, security headers, request timeout + body-size cap, per-client rate limiting, hardened correlation ids, cargo-audit in CI |
-| 21 | Testing | 🟡 | 104 unit + 30 security integration tests; CI-runnable DB-backed e2e suites deferred (see `tests/README.md`) |
+| 21 | Testing | 🟡 | 104 unit + 30 security integration tests; CI DB-backed security/update smoke slices live; Stripe/Supabase/DataForge e2e suites deferred (see `tests/README.md`) |
 | 22 | Documentation | ✅ | all docs present; kept in-sync with code |
 | 23 | CI | ✅ | fmt, clippy -D warnings, test, migration determinism, RLS assert, OpenAPI lint, secret scan, audit |
 
@@ -57,6 +57,9 @@ same change as implementation.
    expected artifact URL. The update-campaign HTTP smoke job starts the real API against
    live PostgreSQL and proves Tauri response shape, same-version/same-build 204s,
    minimum supported/updater version gates, and deterministic rollout bucket behavior.
+   The migration job also proves customer RLS write denial for licenses, license grants,
+   entitlement grants/overrides, usage events, and usage totals even under broad table
+   grants.
 7. Remaining: CI-runnable DB-backed end-to-end suites for Stripe/Supabase/DataForge
    happy paths and failures (the live local suites — 174 checks across Phases 6/7/8/10/12
    — are the blueprint; see `tests/README.md`).

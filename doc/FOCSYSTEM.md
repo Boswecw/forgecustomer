@@ -110,8 +110,8 @@ Implemented today:
 - Supabase migrations for identity, catalog, commerce, licensing, entitlements, usage,
   audit/outbox, privacy, RLS, seed constraints, and fleet/release/update domains.
 - CI for Rust formatting, clippy, tests, migration determinism, RLS coverage,
-  release package publication smoke, update-campaign HTTP smoke, OpenAPI linting,
-  schema parsing, secret scan, and dependency audit.
+  customer RLS write-denial, release package publication smoke, update-campaign HTTP
+  smoke, OpenAPI linting, schema parsing, secret scan, and dependency audit.
 
 Every customer, webhook, and admin route is implemented; no handler returns
 `NOT_IMPLEMENTED`. Still pending before AuthorForge can rely on the service end to end:
@@ -1036,7 +1036,7 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
 | Job | Checks |
 | --- | --- |
 | `rust` | `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all` |
-| `migrations` | Postgres 16 migration apply, deterministic reapply, seed idempotency, RLS coverage, append-only ledger update rejection |
+| `migrations` | Postgres 16 migration apply, deterministic reapply, seed idempotency, RLS coverage, customer RLS write-denial matrix, append-only ledger update rejection |
 | `contracts` | Redocly OpenAPI lint, JSON schema parse checks |
 | `secret-scan` | Gitleaks over repo history |
 | `audit` | `cargo audit` |
@@ -1085,6 +1085,9 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
   held fleets, campaign holds, paused/revoked campaigns, unpublished releases,
   quarantined artifacts, updater-vs-bootstrap artifact role separation, cross-customer
   installation lookups, and duplicate update-event receipt idempotency.
+- The CI migration job also runs a customer RLS write-denial matrix proving a customer JWT
+  role cannot insert licenses, license grants, entitlement grants/overrides, or usage
+  events, and cannot alter usage totals, even when granted broad SQL table privileges.
 - The CI release-pipeline smoke job creates immutable bootstrap/updater fixture
   packages, verifies checksum and size evidence, publishes release/artifact metadata
   into PostgreSQL, starts the real API, and proves the public bootstrap lookup returns

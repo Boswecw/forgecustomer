@@ -44,9 +44,11 @@ Representative codes: `UNAUTHENTICATED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`,
 | `/v1/account`          | provision/read own profile, consent, deletion requests | customer  |
 | `/v1/products`         | public product catalog                              | optional  |
 | `/v1/plans`            | public plan catalog                                 | optional  |
+| `/v1/products/{product}/releases` | public published release/download lookup | none      |
 | `/v1/subscriptions`    | own subscription summary                            | customer  |
 | `/v1/licenses`         | own licenses                                        | customer  |
 | `/v1/installations`    | register / list / activate / heartbeat / deactivate | customer  |
+| `/v1/updates/authorforge` | Tauri-compatible update lookup                  | customer  |
 | `/v1/devices`          | own devices                                         | customer  |
 | `/v1/entitlements`     | current / check / offline-lease                     | customer  |
 | `/v1/usage`            | check / reserve / commit / release / current        | customer  |
@@ -63,13 +65,25 @@ per-domain endpoint semantics, and Phase 10 of the plan for the admin surface.
 - `GET /v1/ready` → `200` when the database is reachable, else `503`.
 - `GET /v1/version` → `{ "service", "version", "git_sha", "app_env" }`.
 
+## Public release distribution
+
+- `GET /v1/products/{product_key}/releases/latest?channel=stable` returns the latest
+  published release metadata only. Draft, validated-but-unpublished, blocked, and retired
+  releases are not exposed.
+- `GET /v1/products/{product_key}/downloads?platform=linux&arch=x86_64&channel=stable`
+  resolves a validated `bootstrap` artifact for the latest published release. The
+  installer is generic: no customer id, fleet id, or personalized binary is embedded in
+  the response. Relative artifact keys use `RELEASE_ARTIFACT_BASE_URL`; absolute artifact
+  URLs are returned as-is.
+
 ## Account provisioning
 
 `POST /v1/account/provision` is the controlled API-owned profile creation flow for a
 Supabase-authenticated user. It validates the customer JWT but does **not** require an
 existing ForgeCustomer profile. The server creates one business customer row for the
-token subject, writes the initial status history receipt, projects the trusted Supabase
-email claim when present, and returns the existing row on repeat calls.
+ token subject, creates/returns the customer's default AuthorForge fleet, writes the
+initial status history receipt, projects the trusted Supabase email claim when present,
+and returns the existing row on repeat calls.
 
 Clients may submit only profile decoration:
 
@@ -100,11 +114,14 @@ server-owned and cannot be set by this endpoint.
 See `docs/LICENSING.md` for the full rules. Summary of the live endpoints:
 
 - `POST /v1/installations` registers an installed application instance, idempotent on the
-  client-supplied `install_key` (8–120 chars of `[A-Za-z0-9._:-]`). An optional
+  client-supplied `install_key` (8–120 chars of `[A-Za-z0-9._:-]`). The server assigns
+  the customer's default fleet and accepts bounded update metadata (`build_id`,
+  `platform`, `architecture`, `package_format`, `updater_version`). An optional
   `device_public_key` (base64 32-byte Ed25519 public key) registers the device identity;
   the private key never leaves the client. Re-registering a deactivated installation
   reactivates the installation record; license slots are only consumed by activation.
-  First registration queues a sanitized `installation_registered` outbox event.
+  First registration queues a sanitized `installation_registered` outbox event including
+  the server-resolved `fleet_id`.
 - `GET /v1/installations`, `GET /v1/devices`, `GET /v1/licenses` list the caller's own
   rows (licenses include `device_limit` and the current `active_devices` count).
 - `POST /v1/installations/{id}/activate` links a license to the installation. With no
@@ -121,6 +138,16 @@ See `docs/LICENSING.md` for the full rules. Summary of the live endpoints:
 - `POST /v1/installations/{id}/deactivate` deactivates the installation and releases its
   active activations, freeing device slots (idempotent). Writes an
   `installation_deactivated` audit event.
+- `GET /v1/updates/authorforge/{target}/{arch}/{current_version}` is the dynamic Tauri
+  updater endpoint. It requires `X-Forge-Installation-ID` and optional build/updater
+  headers, resolves the fleet only from the owned installation, and returns `204` unless
+  every campaign gate passes: active fleet/application, published release, validated
+  artifact, matching channel/ring/platform/package, no hold, version gates, and the
+  server-side HMAC rollout bucket. An eligible update returns exactly
+  `{ version, url, signature, notes, pub_date }`.
+- `POST /v1/installations/{id}/update-events` records minimal update outcomes with the
+  event UUID in `Idempotency-Key`. Unknown body fields are rejected; raw diagnostics,
+  paths, hostnames, logs, and arbitrary client strings are not accepted.
 
 ## Entitlements: snapshots, checks, offline leases
 
@@ -206,8 +233,8 @@ it never bypasses ForgeCustomer's mutation paths or touches the database directl
 
 Authorization is two-tier and fails closed:
 
-- **Reads** (`GET /v1/admin/customers`, `GET /v1/admin/audit`) require any valid operator
-  token.
+- **Reads** (`GET /v1/admin/customers`, fleet/release/campaign/failure reads, and
+  `GET /v1/admin/audit`) require any valid operator token.
 - **Mutations** additionally require the `admin` role in the token's `roles` claim and a
   written `reason` (3–500 chars) that lands in the commercial audit trail with the
   operator id as the actor.
@@ -238,3 +265,25 @@ Live endpoints:
   are compensating events, never edits.
 - `GET /v1/admin/audit` — commercial audit events, filterable by customer and event
   type, newest first.
+- `GET /v1/admin/fleets`, `GET /v1/admin/fleets/{id}`,
+  `POST /v1/admin/fleets/{id}/policy` — operator fleet review and policy changes
+  (display name, ring, channel, beta enrollment).
+- `POST /v1/admin/releases` — idempotent release-pipeline intake for draft release
+  metadata, keyed by product/version/build. It requires an idempotency key and writes
+  operator audit; publication remains separate.
+- `POST /v1/admin/releases/{id}/artifacts` — idempotent immutable artifact registration
+  for bootstrap/updater/recovery artifacts after the pipeline verifies upload, checksum,
+  size, signing, and package evidence. Replays with different metadata are conflicts.
+- `GET /v1/admin/releases`, `GET /v1/admin/releases/{id}`,
+  `POST /v1/admin/releases/{id}/validate|publish|block` — release catalog controls.
+  Validation requires at least one validated artifact; publication requires validated
+  release state.
+- `POST /v1/admin/update-campaigns`, `GET /v1/admin/update-campaigns/{id}`, and
+  `pause|resume|revoke|rollout` mutations — campaign controls. Campaigns are created at
+  `0%` rollout; rollout increases are explicit audited mutations.
+- `POST /v1/admin/update-campaigns/{campaign_id}/holds` and
+  `DELETE /v1/admin/update-campaigns/{campaign_id}/holds/{fleet_id}` — fleet-level
+  campaign holds.
+- `GET /v1/admin/update-failures` — recent failed/recovery update outcome events.
+- `POST /v1/admin/release-artifacts/{id}/quarantine` — quarantine an artifact and pause
+  campaigns targeting its release.

@@ -9,4 +9,5 @@ pub mod customers;
 pub mod entitlements;
 pub mod licensing;
 pub mod privacy;
+pub mod updates;
 pub mod usage;

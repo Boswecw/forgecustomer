@@ -29,6 +29,7 @@ pub struct CustomerProfileRow {
 #[derive(Debug, Clone)]
 pub struct ProvisionedCustomer {
     pub profile: CustomerProfileRow,
+    pub default_fleet_id: Uuid,
     pub created: bool,
 }
 
@@ -123,6 +124,54 @@ pub async fn provision_for_auth_user(
         }
     };
 
+    let default_fleet_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        with inserted as (
+          insert into public.fleets (customer_id, display_name, fleet_type, status, update_ring, release_channel_id)
+          values (
+            $1,
+            coalesce(nullif(trim($2), ''), 'Default fleet'),
+            'default',
+            'active',
+            'standard',
+            (
+              select rc.id
+              from public.release_channels rc
+              join public.products p on p.id = rc.product_id
+              where p.key = 'authorforge' and rc.key = 'stable'
+              limit 1
+            )
+          )
+          on conflict do nothing
+          returning id
+        )
+        select id from inserted
+        union all
+        select id from public.fleets
+        where customer_id = $1 and fleet_type = 'default' and status <> 'deleted'
+        limit 1
+        "#,
+    )
+    .bind(profile.id)
+    .bind(profile.display_name.as_deref())
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        insert into public.fleet_applications (fleet_id, product_id, status, update_ring, release_channel_id)
+        select $1, p.id, 'active', 'standard',
+               (select rc.id from public.release_channels rc
+                where rc.product_id = p.id and rc.key = 'stable' limit 1)
+        from public.products p
+        where p.key = 'authorforge'
+        on conflict (fleet_id, product_id) do nothing
+        "#,
+    )
+    .bind(default_fleet_id)
+    .execute(&mut *tx)
+    .await?;
+
     if let Some(email) = email {
         sqlx::query(
             r#"
@@ -138,5 +187,9 @@ pub async fn provision_for_auth_user(
     }
 
     tx.commit().await?;
-    Ok(ProvisionedCustomer { profile, created })
+    Ok(ProvisionedCustomer {
+        profile,
+        default_fleet_id,
+        created,
+    })
 }

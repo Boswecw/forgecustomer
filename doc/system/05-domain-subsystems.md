@@ -64,6 +64,33 @@ Implemented behavior:
 - Offline leases are time-bound and denied for suspended or revoked contexts; lease
   issuance wiring lands with the entitlement snapshot work.
 
+### Fleets, releases, and updates
+
+ForgeCustomer owns fleet assignment and update eligibility. Clients may identify their
+owned installation, current version/build, platform, architecture, package format, and
+updater version, but they may not claim an arbitrary fleet.
+
+Implemented behavior:
+
+- Account provisioning and installation registration create/resolve a default active
+  fleet and AuthorForge fleet application policy.
+- Release-pipeline intake registers draft release metadata idempotently by
+  product/version/build, then registers immutable bootstrap/updater/recovery artifact
+  metadata after upload/checksum/signature proof.
+- Release publication is operator-controlled: validation requires at least one validated
+  artifact, and publication requires validated release state.
+- Public website/bootstrap lookup exposes only published releases with validated generic
+  bootstrap artifacts; it never embeds customer, fleet, or personalized license state.
+- Campaigns are created at `0%` rollout and move through explicit audited controls
+  (`pause`, `resume`, `revoke`, rollout changes, and fleet holds).
+- Dynamic update lookup returns `204` unless every gate passes: active installation/fleet,
+  active fleet application, published release, validated artifact, matching channel/ring,
+  no fleet hold, matching target/architecture/package, version requirements, and the
+  deterministic server-side HMAC rollout bucket.
+- Update outcome receipts store only bounded enum/code/version/build fields with UUID
+  idempotency. Raw diagnostics, stack traces, hostnames, paths, logs, and creative
+  content are rejected.
+
 ### Entitlements
 
 Entitlements are evaluated deterministically from lower-precedence defaults to

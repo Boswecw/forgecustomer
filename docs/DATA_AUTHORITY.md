@@ -13,7 +13,8 @@ ID — it never uses `auth.users.id` as the sole business identifier.
 
 ### ForgeCustomer PostgreSQL — customer & commercial truth
 Authoritative for: customer records, subscriptions, licenses, installations, devices,
-entitlements, quotas, usage accounting, commercial audit records.
+fleets, release eligibility, update campaigns, bounded update outcomes, entitlements,
+quotas, usage accounting, commercial audit records.
 
 ### Stripe — payment processing
 Authoritative for: payment processing, invoices, payment methods, raw payment events.
@@ -33,6 +34,8 @@ never become the source of truth** for customer identity, licensing, or subscrip
 | Subscription state              | ForgeCustomer DB | normalized from Stripe webhooks        |
 | Payment / invoice / card        | Stripe           | we store references only               |
 | License / installation / device | ForgeCustomer DB | append-only activation/revocation log  |
+| Fleet / release eligibility     | ForgeCustomer DB | client never claims arbitrary fleet    |
+| Update campaign / outcome       | ForgeCustomer DB | minimal bounded state only             |
 | Entitlement decision            | ForgeCustomer DB | signed snapshots issued to clients     |
 | Usage ledger / quotas           | ForgeCustomer DB | append-only events; derived totals     |
 | Commercial audit                | ForgeCustomer DB | append-only                            |

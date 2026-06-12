@@ -17,12 +17,15 @@ schema is additive and deterministic under `supabase/migrations`.
 | `0008_privacy.sql` | Privacy and deletion | `policy_versions`, `consent_records`, `account_deletion_requests` |
 | `0009_rls.sql` | Row-level security | Enables and forces RLS; creates own-row and public-catalog policies. |
 | `0010_seed_constraints.sql` | Determinism and indexes | Adds seed/constraint hardening and operational indexes. |
+| `0011_fleet_release_update_domain.sql` | Fleet, release, and update campaigns | `fleets`, `fleet_applications`, installation update metadata, `product_releases`, `release_artifacts`, `update_campaigns`, `update_campaign_holds`, `installation_update_events` |
 
 ### RLS posture
 
 RLS is enabled and forced across public tables. Customer-facing records are scoped by the
 business `customer_id`, not only by the Supabase auth subject. Catalog tables are public
-read. CI asserts that all public tables have RLS enabled.
+read. Published release metadata/artifacts have public read policies; fleet/application
+and update-event records are scoped to the owning customer. CI asserts that all public
+tables have RLS enabled.
 
 The API still owns privileged writes. RLS is defense in depth, not a substitute for the
 server-side authorization model.
@@ -33,6 +36,7 @@ Append-only tables are part of the commercial trust boundary:
 
 - `usage_events`
 - `commercial_audit_events`
+- `installation_update_events`
 - webhook/event receipt tables where replay protection matters
 - outbox delivery records, except operational status fields required for retry/dead-letter
 

@@ -1,7 +1,8 @@
 ## 1. Overview
 
 ForgeCustomer is the customer, commerce, licensing, entitlement, installation, device,
-usage, privacy, and commercial-audit authority for Boswell Digital Solutions products.
+fleet/update, usage, privacy, and commercial-audit authority for Boswell Digital
+Solutions products.
 The first product is AuthorForge, but the catalog and entitlement model are product
 generic.
 
@@ -30,9 +31,10 @@ Implemented today:
 - Subscription-linked license issuance and sync (issue/suspend/expire/reactivate, device
   limit from plan features) inside webhook processing.
 - Installation registration (idempotent by install key, optional Ed25519 device
-  identity), license activation with device-limit and revocation enforcement, heartbeat,
-  deactivation, and read-own installation/device/license listings, with audit and
-  sanitized `installation_registered` / `license_activated` outbox emission.
+  identity), server-resolved default fleet assignment, update metadata capture, license
+  activation with device-limit and revocation enforcement, heartbeat, deactivation, and
+  read-own installation/device/license listings, with audit and sanitized
+  `installation_registered` / `license_activated` outbox emission.
 - Entitlement snapshot assembly from included-plan baseline, subscription plan, license
   grants, promotional grants, and admin overrides — evaluated fail-closed, Ed25519
   signed, stored for audit/replay, and returned with wire field order matching the
@@ -41,8 +43,12 @@ Implemented today:
   for activated installations, denied for suspended/revoked contexts.
 - The Forge Command admin surface: customer lookup, suspend/restore, Stripe subscription
   resync, operator license issue/revoke, entitlement overrides, compensating usage
-  adjustments, and audit reads — mutations role-gated (`admin`), reason-required, and
-  audited with the operator as actor.
+  adjustments, fleet policy, release validation/publication/block, update-campaign
+  controls, fleet holds, update failure reads, artifact quarantine, and audit reads —
+  mutations role-gated (`admin`), reason-required, and audited with the operator as actor.
+- AuthorForge update foundation: fleet/release/artifact/campaign/hold/outcome schema,
+  deterministic HMAC rollout, dynamic Tauri-compatible update lookup, and bounded
+  update-event receipts that reject raw diagnostics.
 - The usage lifecycle: advisory checks, idempotent lock-serialized reservations with
   expiry (lazy + background sweeper), reservation/direct commits on the append-only
   ledger with explainable quota decisions, releases, and per-meter current totals;
@@ -59,7 +65,7 @@ Implemented today:
   decisions, device limits, offline lease validation, redaction, Stripe webhook signature
   verification, and DataForge publish hygiene.
 - Supabase migrations for identity, catalog, commerce, licensing, entitlements, usage,
-  audit/outbox, privacy, RLS, and seed constraints.
+  audit/outbox, privacy, RLS, seed constraints, and fleet/release/update domains.
 - CI for Rust formatting, clippy, tests, migration determinism, RLS coverage, OpenAPI
   linting, schema parsing, secret scan, and dependency audit.
 
@@ -68,6 +74,8 @@ Every customer, webhook, and admin route is implemented; no handler returns
 
 - CI-runnable DB-backed end-to-end suites (the live local verification suites covering
   licensing, entitlements, usage, admin, and deletion are the blueprint).
+- Release-pipeline package/upload smoke tests and DB-backed update eligibility matrix
+  tests.
 
 ### Repository map
 

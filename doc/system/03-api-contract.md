@@ -12,6 +12,8 @@ The HTTP API uses JSON over HTTPS with base path `/v1`. The machine-readable con
 | `GET /v1/version` | implemented | Service name, crate version, `GIT_SHA`, and `APP_ENV`. |
 | `GET /v1/products` | implemented | Active product catalog rows. |
 | `GET /v1/plans` | implemented | Active plan rows. |
+| `GET /v1/products/{product_key}/releases/latest` | implemented | Latest published release metadata for a channel. |
+| `GET /v1/products/{product_key}/downloads` | implemented | Generic bootstrap artifact lookup for the latest published release. |
 | `GET /v1/entitlements/keys` | implemented | Published Ed25519 verification keys. |
 | `POST /v1/webhooks/stripe` | implemented processing layer | Verifies Stripe signature, parses a minimal event envelope, stores/dedupes by Stripe event id, ignores unsupported events, and transactionally applies supported checkout/subscription/invoice state with audit + outbox + subscription-linked license sync. |
 
@@ -33,6 +35,8 @@ Current route surface:
 - `POST /v1/installations/{id}/activate`
 - `POST /v1/installations/{id}/heartbeat`
 - `POST /v1/installations/{id}/deactivate`
+- `POST /v1/installations/{id}/update-events`
+- `GET /v1/updates/authorforge/{target}/{arch}/{current_version}`
 - `GET /v1/devices`
 - `GET /v1/entitlements/current`
 - `POST /v1/entitlements/check`
@@ -76,13 +80,19 @@ answers an advisory feature or quota question read-only and fail-closed.
 document for an activated installation and refuses suspended, non-active-license, and
 revoked contexts.
 
-The licensing surface is implemented: `POST /v1/installations` registers idempotently by
-client install key (optionally registering an Ed25519 device public key);
+The licensing/update surface is implemented: `POST /v1/installations` registers
+idempotently by client install key, assigns the server-resolved default fleet, records
+bounded update metadata, and optionally registers an Ed25519 device public key;
 `POST /v1/installations/{id}/activate` links a license to the installation under a row
 lock, enforcing the device limit and explicit revocations and failing closed on
 non-active licenses; heartbeat records liveness; deactivate releases the installation's
 activations; and the `GET` listings return the caller's own installations, devices, and
-licenses (with active device counts).
+licenses (with active device counts). `GET /v1/updates/authorforge/{target}/{arch}/{current_version}`
+is the Tauri-compatible dynamic update endpoint; it resolves fleet from the owned
+installation, applies campaign/release/artifact/version/hold/HMAC-rollout gates, returns
+`204` for no eligible update, and returns only `{ version, url, signature, notes,
+pub_date }` when eligible. `POST /v1/installations/{id}/update-events` stores only
+bounded update outcome receipts keyed by UUID `Idempotency-Key`.
 
 `POST /v1/checkout` is implemented for active customers. It resolves the active paid
 catalog plan server-side, creates a Stripe Checkout Session, stores the returned Stripe
@@ -109,6 +119,26 @@ Current route surface:
 - `POST /v1/admin/entitlements/override`
 - `POST /v1/admin/usage/adjust`
 - `GET /v1/admin/audit`
+- `GET /v1/admin/fleets`
+- `GET /v1/admin/fleets/{id}`
+- `POST /v1/admin/fleets/{id}/policy`
+- `GET /v1/admin/releases`
+- `POST /v1/admin/releases`
+- `GET /v1/admin/releases/{id}`
+- `POST /v1/admin/releases/{id}/artifacts`
+- `POST /v1/admin/releases/{id}/validate`
+- `POST /v1/admin/releases/{id}/publish`
+- `POST /v1/admin/releases/{id}/block`
+- `POST /v1/admin/update-campaigns`
+- `GET /v1/admin/update-campaigns/{id}`
+- `POST /v1/admin/update-campaigns/{id}/pause`
+- `POST /v1/admin/update-campaigns/{id}/resume`
+- `POST /v1/admin/update-campaigns/{id}/revoke`
+- `POST /v1/admin/update-campaigns/{id}/rollout`
+- `POST /v1/admin/update-campaigns/{campaign_id}/holds`
+- `DELETE /v1/admin/update-campaigns/{campaign_id}/holds/{fleet_id}`
+- `GET /v1/admin/update-failures`
+- `POST /v1/admin/release-artifacts/{id}/quarantine`
 - `GET /v1/admin/deletion-requests`
 - `POST /v1/admin/deletion-requests/{id}/advance`
 - `POST /v1/admin/deletion-requests/{id}/reject`
@@ -119,7 +149,12 @@ require any valid operator token; mutations require the `admin` role and a writt
 reason, write operator-actor commercial audit, preserve append-only ledgers (usage
 corrections are compensating `adjustment` events behind a required idempotency key), and
 queue the contract-defined outbox events (`customer_suspended`, `customer_restored`,
-`license_revoked`). Subscription resync pulls current truth from the Stripe API,
+`license_revoked`). Fleet/release/campaign mutations also write operator audit and
+require idempotency keys for retryable commands. Release validation requires validated
+artifact proof; release and immutable artifact metadata can be registered by the
+release pipeline through audited admin endpoints before validation/publication. Artifact
+quarantine pauses campaigns targeting the affected release.
+Subscription resync pulls current truth from the Stripe API,
 reprojects it, syncs the linked license, and advances the event watermark so stale
 out-of-order webhooks are subsequently skipped. Suspend/restore and revoke are
 idempotent and report `changed: false` on replay.

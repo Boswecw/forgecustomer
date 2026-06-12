@@ -57,6 +57,57 @@ paths:
       security: []
       responses:
         "200": { description: Plan list }
+  /v1/products/{product_key}/releases/latest:
+    get:
+      tags: [catalog]
+      summary: Latest published release metadata
+      security: []
+      parameters:
+        - name: product_key
+          in: path
+          required: true
+          schema: { type: string, examples: ["authorforge"] }
+        - name: channel
+          in: query
+          required: false
+          schema: { type: string, default: stable }
+      responses:
+        "200": { description: Latest published release row }
+        "404": { description: Published release not found }
+  /v1/products/{product_key}/downloads:
+    get:
+      tags: [catalog]
+      summary: Bootstrap installer download lookup
+      description: >
+        Public website-facing lookup for a generic bootstrap artifact. Only published
+        releases with validated bootstrap artifacts are returned; draft, blocked, and
+        quarantined artifacts are never exposed.
+      security: []
+      parameters:
+        - name: product_key
+          in: path
+          required: true
+          schema: { type: string, examples: ["authorforge"] }
+        - name: platform
+          in: query
+          required: true
+          schema: { type: string, enum: [windows, linux, darwin] }
+        - name: arch
+          in: query
+          required: true
+          schema: { type: string, enum: [x86_64, aarch64, i686, armv7] }
+        - name: channel
+          in: query
+          required: false
+          schema: { type: string, default: stable }
+        - name: package_format
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200": { description: Bootstrap download metadata and URL }
+        "404": { description: Bootstrap download not found }
+        "503": { description: Relative artifact URL base is not configured }
   /v1/account:
     get:
       tags: [account]
@@ -270,6 +321,77 @@ paths:
                   already_deactivated: { type: boolean }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { description: Installation not found }
+  /v1/installations/{id}/update-events:
+    post:
+      tags: [licensing]
+      summary: Record a minimal AuthorForge update outcome event
+      description: >
+        Stores only bounded, non-diagnostic update outcome state. The Idempotency-Key
+        must be the event UUID; duplicate receipts return the same event id with
+        received=false.
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InstallationUpdateEventRequest" }
+      responses:
+        "200": { description: "Receipt { event_id, event_type, received }" }
+        "400": { description: Missing or non-UUID Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: "Installation, campaign, or release not found" }
+        "409": { description: Campaign does not target the supplied release }
+        "422": { description: Event validation failed }
+  /v1/updates/authorforge/{target}/{arch}/{current_version}:
+    get:
+      tags: [licensing]
+      summary: Tauri-compatible AuthorForge update lookup
+      description: >
+        Resolves update eligibility from the caller's owned installation and server-side
+        fleet assignment. ForgeCustomer never trusts a fleet id from the client. A miss
+        returns 204 No Content; an eligible update returns exactly the Tauri updater
+        response shape.
+      parameters:
+        - name: target
+          in: path
+          required: true
+          schema: { type: string, enum: [windows, linux, darwin] }
+        - name: arch
+          in: path
+          required: true
+          schema: { type: string, enum: [x86_64, aarch64, i686, armv7] }
+        - name: current_version
+          in: path
+          required: true
+          schema: { type: string }
+        - name: X-Forge-Installation-ID
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+        - name: X-Forge-Build-ID
+          in: header
+          required: false
+          schema: { type: string }
+        - name: X-Forge-Updater-Version
+          in: header
+          required: false
+          schema: { type: string }
+        - name: X-Forge-Package-Format
+          in: header
+          required: false
+          schema: { type: string, default: nsis }
+      responses:
+        "200":
+          description: Update available
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TauriUpdateResponse" }
+        "204": { description: No eligible update }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { description: Header/path validation failed }
+        "503": { description: Update rollout or artifact URL configuration missing }
   /v1/devices:
     get:
       tags: [licensing]
@@ -691,6 +813,350 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { description: Customer or meter not found }
         "422": { description: Validation failed }
+  /v1/admin/fleets:
+    get:
+      tags: [admin]
+      summary: List fleets for operator review
+      security: [{ adminAuth: [] }]
+      responses:
+        "200": { description: "Fleet list with customer, policy, installation count, and hold count" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/admin/fleets/{id}:
+    get:
+      tags: [admin]
+      summary: Read one fleet
+      security: [{ adminAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "200": { description: "Fleet row" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Fleet not found }
+  /v1/admin/fleets/{id}/policy:
+    post:
+      tags: [admin]
+      summary: Update fleet policy (requires `admin` role)
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminFleetPolicyRequest" }
+      responses:
+        "200": { description: Updated fleet row }
+        "400": { description: Missing Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Fleet or channel not found }
+        "422": { description: Validation failed }
+  /v1/admin/releases:
+    get:
+      tags: [admin]
+      summary: List release catalog rows
+      security: [{ adminAuth: [] }]
+      responses:
+        "200": { description: Release list with artifact/validation counts }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [admin]
+      summary: Register or return a draft release
+      description: >
+        Idempotent by product/version/build. This is the CI/release-pipeline metadata
+        intake; publication remains a separate operator action.
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminReleaseCreateRequest" }
+      responses:
+        "200": { description: Release row }
+        "400": { description: Missing Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Product or release channel not found }
+        "409": { description: Existing release has conflicting immutable metadata }
+        "422": { description: Validation failed }
+  /v1/admin/releases/{id}:
+    get:
+      tags: [admin]
+      summary: Read one release
+      security: [{ adminAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "200": { description: Release row }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Release not found }
+  /v1/admin/releases/{id}/artifacts:
+    post:
+      tags: [admin]
+      summary: Register validated immutable artifact metadata
+      description: >
+        Registers bootstrap/updater/recovery artifact metadata after the release pipeline
+        verifies upload, size, checksum, signing, and package evidence. Replays with the
+        same tuple and identical metadata are idempotent; different metadata conflicts.
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminArtifactRegisterRequest" }
+      responses:
+        "200": { description: Artifact row }
+        "400": { description: Missing Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Release not found }
+        "409": { description: "Release immutable, or artifact tuple conflicts" }
+        "422": { description: Validation failed }
+  /v1/admin/releases/{id}/validate:
+    post:
+      tags: [admin]
+      summary: Mark a release validated after artifact proof
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminReasonRequest" }
+      responses:
+        "200": { description: Validated release row }
+        "400": { description: Missing Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Release not found }
+        "409": { description: Invalid release state or no validated artifacts }
+  /v1/admin/releases/{id}/publish:
+    post:
+      tags: [admin]
+      summary: Publish a validated release
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminReasonRequest" }
+      responses:
+        "200": { description: Published release row }
+        "400": { description: Missing Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Release not found }
+        "409": { description: Release is not validated }
+  /v1/admin/releases/{id}/block:
+    post:
+      tags: [admin]
+      summary: Block a release
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminReasonRequest" }
+      responses:
+        "200": { description: Blocked release row }
+        "400": { description: Missing Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Release not found }
+  /v1/admin/update-campaigns:
+    post:
+      tags: [admin]
+      summary: Create an update campaign at 0% rollout
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminCampaignCreateRequest" }
+      responses:
+        "200": { description: Campaign row }
+        "400": { description: Missing Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: "Product, channel, or release not found" }
+        "422": { description: Validation failed }
+  /v1/admin/update-campaigns/{id}:
+    get:
+      tags: [admin]
+      summary: Read one update campaign
+      security: [{ adminAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "200": { description: Campaign row }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Campaign not found }
+  /v1/admin/update-campaigns/{id}/pause:
+    post:
+      tags: [admin]
+      summary: Pause an update campaign
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminReasonRequest" }
+      responses:
+        "200": { description: Campaign row }
+        "400": { description: Missing Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Campaign not found }
+  /v1/admin/update-campaigns/{id}/resume:
+    post:
+      tags: [admin]
+      summary: Resume an update campaign when its release is published
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminReasonRequest" }
+      responses:
+        "200": { description: Campaign row }
+        "400": { description: Missing Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Campaign not found }
+        "409": { description: Target release is not published }
+  /v1/admin/update-campaigns/{id}/revoke:
+    post:
+      tags: [admin]
+      summary: Revoke an update campaign
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminReasonRequest" }
+      responses:
+        "200": { description: Campaign row }
+        "400": { description: Missing Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Campaign not found }
+  /v1/admin/update-campaigns/{id}/rollout:
+    post:
+      tags: [admin]
+      summary: Set campaign rollout percentage
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminCampaignRolloutRequest" }
+      responses:
+        "200": { description: Campaign row }
+        "400": { description: Missing Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Campaign not found }
+        "422": { description: Validation failed }
+  /v1/admin/update-campaigns/{campaign_id}/holds:
+    post:
+      tags: [admin]
+      summary: Hold a fleet out of an update campaign
+      security: [{ adminAuth: [] }]
+      parameters:
+        - name: campaign_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminFleetHoldRequest" }
+      responses:
+        "200": { description: Hold row }
+        "400": { description: Missing Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Campaign or fleet not found }
+  /v1/admin/update-campaigns/{campaign_id}/holds/{fleet_id}:
+    delete:
+      tags: [admin]
+      summary: Remove a fleet hold
+      security: [{ adminAuth: [] }]
+      parameters:
+        - name: campaign_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: fleet_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminReasonRequest" }
+      responses:
+        "200": { description: Removed hold row }
+        "400": { description: Missing Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Hold not found }
+  /v1/admin/update-failures:
+    get:
+      tags: [admin]
+      summary: List recent failed update outcome events
+      security: [{ adminAuth: [] }]
+      responses:
+        "200": { description: Failed update events }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/admin/release-artifacts/{id}/quarantine:
+    post:
+      tags: [admin]
+      summary: Quarantine an artifact and pause campaigns targeting its release
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminReasonRequest" }
+      responses:
+        "200": { description: Quarantined artifact row }
+        "400": { description: Missing Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Artifact not found }
   /v1/admin/deletion-requests:
     get:
       tags: [admin]
@@ -826,10 +1292,14 @@ components:
         timezone: { type: ["string", "null"], maxLength: 80 }
     AccountProvisionResponse:
       type: object
-      required: [customer_id, auth_user_id, customer_type, status, created]
+      required: [customer_id, auth_user_id, default_fleet_id, customer_type, status, created]
       properties:
         customer_id: { type: string, format: uuid }
         auth_user_id: { type: string, format: uuid }
+        default_fleet_id:
+          type: string
+          format: uuid
+          description: Server-resolved default fleet for AuthorForge installation bootstrap.
         customer_type: { type: string, examples: ["individual"] }
         display_name: { type: ["string", "null"] }
         status: { type: string, examples: ["active"] }
@@ -880,9 +1350,18 @@ components:
       required: [id, install_key, product_key, status, created_at]
       properties:
         id: { type: string, format: uuid }
+        fleet_id:
+          type: ["string", "null"]
+          format: uuid
+          description: Server-resolved fleet assignment; never trusted from client claims.
         install_key: { type: string }
         product_key: { type: string }
         app_version: { type: ["string", "null"] }
+        build_id: { type: ["string", "null"] }
+        platform: { type: ["string", "null"], enum: [windows, linux, darwin, null] }
+        architecture: { type: ["string", "null"], enum: [x86_64, aarch64, i686, armv7, null] }
+        package_format: { type: ["string", "null"] }
+        updater_version: { type: ["string", "null"] }
         status: { type: string, enum: [active, deactivated] }
         device_id: { type: ["string", "null"], format: uuid }
         last_heartbeat_at: { type: ["string", "null"], format: date-time }
@@ -916,6 +1395,11 @@ components:
           type: ["string", "null"]
           default: authorforge
         app_version: { type: ["string", "null"], maxLength: 64 }
+        build_id: { type: ["string", "null"], maxLength: 120 }
+        platform: { type: ["string", "null"], enum: [windows, linux, darwin, null] }
+        architecture: { type: ["string", "null"], enum: [x86_64, aarch64, i686, armv7, null] }
+        package_format: { type: ["string", "null"], maxLength: 40 }
+        updater_version: { type: ["string", "null"], maxLength: 64 }
         device_public_key:
           type: ["string", "null"]
           description: Base64-encoded 32-byte Ed25519 public key (private key stays client-side).
@@ -928,9 +1412,15 @@ components:
       required: [installation_id, install_key, product_key, status, created, reactivated]
       properties:
         installation_id: { type: string, format: uuid }
+        fleet_id: { type: ["string", "null"], format: uuid }
         install_key: { type: string }
         product_key: { type: string }
         app_version: { type: ["string", "null"] }
+        build_id: { type: ["string", "null"] }
+        platform: { type: ["string", "null"] }
+        architecture: { type: ["string", "null"] }
+        package_format: { type: ["string", "null"] }
+        updater_version: { type: ["string", "null"] }
         status: { type: string, enum: [active] }
         device_id: { type: ["string", "null"], format: uuid }
         created:
@@ -954,6 +1444,145 @@ components:
         already_active:
           type: boolean
           description: True when the pairing was already active (idempotent re-activation).
+    TauriUpdateResponse:
+      type: object
+      additionalProperties: false
+      required: [version, url, signature, pub_date]
+      properties:
+        version: { type: string, examples: ["1.0.1"] }
+        url:
+          type: string
+          format: uri
+          description: Artifact URL resolved from the validated release artifact.
+        signature:
+          type: string
+          description: Tauri updater signature contents for the selected artifact.
+        notes: { type: ["string", "null"] }
+        pub_date: { type: string, format: date-time }
+    InstallationUpdateEventRequest:
+      type: object
+      additionalProperties: false
+      required: [event_type]
+      properties:
+        campaign_id: { type: ["string", "null"], format: uuid }
+        release_id: { type: ["string", "null"], format: uuid }
+        event_type:
+          type: string
+          enum:
+            - eligible
+            - offered
+            - download_started
+            - downloaded
+            - install_started
+            - install_completed
+            - relaunch_confirmed
+            - post_update_health_passed
+            - post_update_health_failed
+            - rejected
+            - failed
+            - recovery_required
+        from_version: { type: ["string", "null"], maxLength: 64 }
+        from_build_id: { type: ["string", "null"], maxLength: 80 }
+        to_version: { type: ["string", "null"], maxLength: 64 }
+        to_build_id: { type: ["string", "null"], maxLength: 80 }
+        failure_code: { type: ["string", "null"], maxLength: 80 }
+        failure_class: { type: ["string", "null"], maxLength: 80 }
+        occurred_at: { type: ["string", "null"], format: date-time }
+    AdminFleetPolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        display_name: { type: ["string", "null"], maxLength: 120 }
+        update_ring:
+          type: ["string", "null"]
+          enum: [canary, preview, standard, delayed, null]
+        release_channel:
+          type: ["string", "null"]
+          description: Release channel key; `release_channel_key` is also accepted.
+        release_channel_key: { type: ["string", "null"] }
+        beta_enrolled: { type: ["boolean", "null"] }
+        reason: { type: string, minLength: 3, maxLength: 500 }
+    AdminReleaseCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [product_key, version, build_id, reason]
+      properties:
+        product_key: { type: string, examples: ["authorforge"] }
+        version:
+          type: string
+          description: SemVer major.minor.patch, with optional prerelease/build metadata.
+        build_id: { type: string, minLength: 3, maxLength: 120 }
+        release_channel: { type: ["string", "null"], default: stable }
+        release_channel_key: { type: ["string", "null"] }
+        changelog_markdown: { type: ["string", "null"], maxLength: 16000 }
+        release_notes: { type: ["string", "null"], maxLength: 16000 }
+        minimum_supported_version: { type: ["string", "null"] }
+        minimum_updater_version: { type: ["string", "null"] }
+        reason: { type: string, minLength: 3, maxLength: 500 }
+    AdminArtifactRegisterRequest:
+      type: object
+      additionalProperties: false
+      required:
+        [platform, architecture, package_format, artifact_role, storage_key, size_bytes,
+         sha256, signing_key_id, os_signature_status, reason]
+      properties:
+        platform: { type: string, enum: [windows, linux, darwin] }
+        architecture: { type: string, enum: [x86_64, aarch64, i686, armv7] }
+        package_format: { type: string, maxLength: 40 }
+        artifact_role: { type: string, enum: [bootstrap, updater, recovery] }
+        storage_key:
+          type: string
+          maxLength: 512
+          description: Immutable object key or absolute artifact URL; storage credentials are never returned.
+        size_bytes: { type: integer, minimum: 1 }
+        sha256:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        tauri_signature:
+          type: ["string", "null"]
+          maxLength: 2048
+          description: Required when artifact_role is updater.
+        signing_key_id: { type: string, minLength: 3, maxLength: 120 }
+        os_signature_status:
+          type: string
+          enum: [verified, not_applicable]
+        reason: { type: string, minLength: 3, maxLength: 500 }
+    AdminCampaignCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [product_key, target_release_id, campaign_slug, reason]
+      properties:
+        product_key: { type: string, examples: ["authorforge"] }
+        target_release_id: { type: string, format: uuid }
+        campaign_slug: { type: string, minLength: 3, maxLength: 80 }
+        release_channel: { type: ["string", "null"], default: stable }
+        release_channel_key: { type: ["string", "null"] }
+        target_update_ring:
+          type: ["string", "null"]
+          enum: [canary, preview, standard, delayed, null]
+        rollout_percentage:
+          type: ["integer", "null"]
+          minimum: 0
+          maximum: 0
+          description: Campaigns are created at 0%; use the rollout endpoint to increase.
+        starts_at: { type: ["string", "null"], format: date-time }
+        emergency: { type: ["boolean", "null"] }
+        reason: { type: string, minLength: 3, maxLength: 500 }
+    AdminCampaignRolloutRequest:
+      type: object
+      additionalProperties: false
+      required: [rollout_percentage, reason]
+      properties:
+        rollout_percentage: { type: integer, minimum: 0, maximum: 100 }
+        reason: { type: string, minLength: 3, maxLength: 500 }
+    AdminFleetHoldRequest:
+      type: object
+      additionalProperties: false
+      required: [fleet_id, reason]
+      properties:
+        fleet_id: { type: string, format: uuid }
+        reason: { type: string, minLength: 3, maxLength: 500 }
     AdminReasonRequest:
       type: object
       additionalProperties: false

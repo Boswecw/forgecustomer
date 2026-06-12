@@ -12,4 +12,5 @@ pub mod license;
 pub mod redaction;
 pub mod snapshot;
 pub mod subscription;
+pub mod updates;
 pub mod usage;

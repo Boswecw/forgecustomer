@@ -10,9 +10,10 @@ pub mod entitlements;
 pub mod health;
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::HeaderMap;
-use axum::routing::{get, post};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -22,8 +23,13 @@ use uuid::Uuid;
 
 use crate::auth::{AdminContext, AuthUserContext, CustomerContext};
 use crate::domain::admin::{
-    clean_adjustment_amount, clean_device_limit, clean_override_value, clean_period_key,
-    clean_reason,
+    clean_adjustment_amount, clean_artifact_architecture, clean_artifact_platform,
+    clean_artifact_role, clean_build_id, clean_campaign_slug, clean_device_limit,
+    clean_optional_display_name, clean_optional_markdown, clean_os_signature_status,
+    clean_override_value, clean_package_format, clean_period_key, clean_reason,
+    clean_release_channel_key, clean_release_version, clean_rollout_percentage, clean_sha256,
+    clean_signing_key_id, clean_size_bytes, clean_storage_key, clean_tauri_signature,
+    clean_update_ring,
 };
 use crate::domain::checkout::{validate_checkout_input, CheckoutInput};
 use crate::domain::customer::{
@@ -31,6 +37,11 @@ use crate::domain::customer::{
 };
 use crate::domain::entitlement::clean_entitlement_key;
 use crate::domain::installation::{clean_app_version, validate_registration, RegistrationInput};
+use crate::domain::updates::{
+    clean_update_architecture, clean_update_event_type, clean_update_failure_code,
+    clean_update_package_format, clean_update_platform, rollout_allows, version_at_least,
+    version_greater, UpdateValidationError,
+};
 use crate::domain::usage::{
     clean_usage_amount, decide, period_key_for, quota_key_candidates, Decision,
 };
@@ -42,6 +53,7 @@ use crate::integrations::stripe::{
 use crate::middleware as mw;
 use crate::repositories::commerce::{StripeWebhookApplyError, StripeWebhookRecordOutcome};
 use crate::repositories::licensing::{self, ActivationError, RegistrationError};
+use crate::repositories::updates as update_repo;
 use crate::repositories::usage as usage_repo;
 use crate::repositories::{admin, commerce, customers, privacy};
 use crate::state::AppState;
@@ -54,6 +66,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/version", get(health::version))
         .route("/v1/products", get(catalog::list_products))
         .route("/v1/plans", get(catalog::list_plans))
+        .route(
+            "/v1/products/:product_key/releases/latest",
+            get(public_latest_release),
+        )
+        .route(
+            "/v1/products/:product_key/downloads",
+            get(public_bootstrap_download),
+        )
         .route("/v1/entitlements/keys", get(entitlements::keys));
 
     let customer = Router::new()
@@ -85,6 +105,14 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/installations/:id/deactivate",
             post(installation_deactivate),
         )
+        .route(
+            "/v1/installations/:id/update-events",
+            post(installation_update_event),
+        )
+        .route(
+            "/v1/updates/authorforge/:target/:arch/:current_version",
+            get(authorforge_update_check),
+        )
         .route("/v1/devices", get(devices_get))
         .route("/v1/entitlements/current", get(entitlements::current))
         .route("/v1/entitlements/check", post(entitlements::check))
@@ -111,6 +139,61 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/admin/entitlements/override", post(admin_override))
         .route("/v1/admin/usage/adjust", post(admin_usage_adjust))
         .route("/v1/admin/audit", get(admin_audit))
+        .route("/v1/admin/fleets", get(admin_fleets))
+        .route("/v1/admin/fleets/:id", get(admin_fleet))
+        .route("/v1/admin/fleets/:id/policy", post(admin_fleet_policy))
+        .route(
+            "/v1/admin/releases",
+            get(admin_releases).post(admin_release_create),
+        )
+        .route("/v1/admin/releases/:id", get(admin_release))
+        .route(
+            "/v1/admin/releases/:id/artifacts",
+            post(admin_release_artifact_register),
+        )
+        .route(
+            "/v1/admin/releases/:id/validate",
+            post(admin_release_validate),
+        )
+        .route(
+            "/v1/admin/releases/:id/publish",
+            post(admin_release_publish),
+        )
+        .route("/v1/admin/releases/:id/block", post(admin_release_block))
+        .route(
+            "/v1/admin/update-campaigns",
+            post(admin_update_campaign_create),
+        )
+        .route("/v1/admin/update-campaigns/:id", get(admin_update_campaign))
+        .route(
+            "/v1/admin/update-campaigns/:id/pause",
+            post(admin_update_campaign_pause),
+        )
+        .route(
+            "/v1/admin/update-campaigns/:id/resume",
+            post(admin_update_campaign_resume),
+        )
+        .route(
+            "/v1/admin/update-campaigns/:id/revoke",
+            post(admin_update_campaign_revoke),
+        )
+        .route(
+            "/v1/admin/update-campaigns/:id/rollout",
+            post(admin_update_campaign_rollout),
+        )
+        .route(
+            "/v1/admin/update-campaigns/:campaign_id/holds",
+            post(admin_update_campaign_hold_add),
+        )
+        .route(
+            "/v1/admin/update-campaigns/:campaign_id/holds/:fleet_id",
+            delete(admin_update_campaign_hold_remove),
+        )
+        .route("/v1/admin/update-failures", get(admin_update_failures))
+        .route(
+            "/v1/admin/release-artifacts/:id/quarantine",
+            post(admin_release_artifact_quarantine),
+        )
         .route("/v1/admin/deletion-requests", get(admin_deletion_list))
         .route(
             "/v1/admin/deletion-requests/:id/advance",
@@ -166,6 +249,7 @@ struct ProvisionAccountRequest {
 struct AccountProvisionResponse {
     customer_id: Uuid,
     auth_user_id: Uuid,
+    default_fleet_id: Uuid,
     customer_type: String,
     display_name: Option<String>,
     status: String,
@@ -196,6 +280,11 @@ struct InstallationRegisterRequest {
     install_key: String,
     product_key: Option<String>,
     app_version: Option<String>,
+    build_id: Option<String>,
+    platform: Option<String>,
+    architecture: Option<String>,
+    package_format: Option<String>,
+    updater_version: Option<String>,
     device_public_key: Option<String>,
     device_label: Option<String>,
 }
@@ -203,9 +292,15 @@ struct InstallationRegisterRequest {
 #[derive(Debug, Serialize)]
 struct InstallationRegisterResponse {
     installation_id: Uuid,
+    fleet_id: Option<Uuid>,
     install_key: String,
     product_key: String,
     app_version: Option<String>,
+    build_id: Option<String>,
+    platform: Option<String>,
+    architecture: Option<String>,
+    package_format: Option<String>,
+    updater_version: Option<String>,
     status: String,
     device_id: Option<Uuid>,
     created: bool,
@@ -239,6 +334,72 @@ struct InstallationDeactivateResponse {
     status: String,
     released_activations: u64,
     already_deactivated: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TauriUpdateResponse {
+    version: String,
+    url: String,
+    signature: String,
+    notes: Option<String>,
+    pub_date: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PublicLatestReleaseQuery {
+    channel: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PublicDownloadQuery {
+    platform: String,
+    arch: String,
+    channel: Option<String>,
+    package_format: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstallationUpdateEventRequest {
+    campaign_id: Option<Uuid>,
+    release_id: Option<Uuid>,
+    event_type: String,
+    from_version: Option<String>,
+    from_build_id: Option<String>,
+    to_version: Option<String>,
+    to_build_id: Option<String>,
+    failure_code: Option<String>,
+    failure_class: Option<String>,
+    occurred_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminReleaseCreateRequest {
+    product_key: String,
+    version: String,
+    build_id: String,
+    release_channel: Option<String>,
+    release_channel_key: Option<String>,
+    changelog_markdown: Option<String>,
+    release_notes: Option<String>,
+    minimum_supported_version: Option<String>,
+    minimum_updater_version: Option<String>,
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminArtifactRegisterRequest {
+    platform: String,
+    architecture: String,
+    package_format: String,
+    artifact_role: String,
+    storage_key: String,
+    size_bytes: i64,
+    sha256: String,
+    tauri_signature: Option<String>,
+    signing_key_id: String,
+    os_signature_status: String,
+    reason: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -321,6 +482,66 @@ fn registration_error(error: RegistrationError) -> AppError {
     }
 }
 
+fn clean_public_release_channel(value: Option<&str>) -> AppResult<String> {
+    clean_release_channel_key(value.unwrap_or("stable")).map_err(admin_validation_error)
+}
+
+async fn public_latest_release(
+    State(state): State<AppState>,
+    Path(product_key): Path<String>,
+    Query(query): Query<PublicLatestReleaseQuery>,
+) -> AppResult<Json<Value>> {
+    let product_key = entitlements::clean_product_key(Some(&product_key))?;
+    let channel = clean_public_release_channel(query.channel.as_deref())?;
+    let release = update_repo::latest_published_release(&state.pool, &product_key, &channel)
+        .await?
+        .ok_or_else(|| AppError::not_found("Published release not found."))?;
+    Ok(Json(json!({ "release": release })))
+}
+
+async fn public_bootstrap_download(
+    State(state): State<AppState>,
+    Path(product_key): Path<String>,
+    Query(query): Query<PublicDownloadQuery>,
+) -> AppResult<Json<Value>> {
+    let product_key = entitlements::clean_product_key(Some(&product_key))?;
+    let channel = clean_public_release_channel(query.channel.as_deref())?;
+    let platform = clean_artifact_platform(&query.platform).map_err(admin_validation_error)?;
+    let architecture = clean_artifact_architecture(&query.arch).map_err(admin_validation_error)?;
+    let package_format = match query.package_format.as_deref() {
+        Some(value) => Some(clean_package_format(value).map_err(admin_validation_error)?),
+        None => None,
+    };
+
+    let download = update_repo::bootstrap_download(
+        &state.pool,
+        update_repo::BootstrapDownloadInput {
+            product_key: &product_key,
+            channel_key: &channel,
+            platform: &platform,
+            architecture: &architecture,
+            package_format: package_format.as_deref(),
+        },
+    )
+    .await?
+    .ok_or_else(|| AppError::not_found("Bootstrap download not found."))?;
+
+    Ok(Json(json!({
+        "product_key": download.product_key,
+        "version": download.version,
+        "build_id": download.build_id,
+        "release_channel": download.release_channel_key,
+        "platform": download.platform,
+        "architecture": download.architecture,
+        "package_format": download.package_format,
+        "download_url": artifact_url(&state, &download.storage_key)?,
+        "sha256": download.sha256,
+        "size_bytes": download.size_bytes,
+        "release_notes": download.release_notes,
+        "published_at": download.published_at,
+    })))
+}
+
 fn activation_error(error: ActivationError) -> AppError {
     match error {
         ActivationError::InstallationNotFound => AppError::not_found("Installation not found."),
@@ -390,6 +611,7 @@ async fn account_provision(
     Ok(Json(AccountProvisionResponse {
         customer_id: profile.id,
         auth_user_id: profile.auth_user_id,
+        default_fleet_id: provisioned.default_fleet_id,
         customer_type: profile.customer_type,
         display_name: profile.display_name,
         status: profile.status,
@@ -513,6 +735,11 @@ async fn installations_register(
         install_key: &request.install_key,
         product_key: request.product_key.as_deref(),
         app_version: request.app_version.as_deref(),
+        build_id: request.build_id.as_deref(),
+        platform: request.platform.as_deref(),
+        architecture: request.architecture.as_deref(),
+        package_format: request.package_format.as_deref(),
+        updater_version: request.updater_version.as_deref(),
         device_public_key: request.device_public_key.as_deref(),
         device_label: request.device_label.as_deref(),
     })
@@ -525,9 +752,15 @@ async fn installations_register(
     let installation = registered.installation;
     Ok(Json(InstallationRegisterResponse {
         installation_id: installation.id,
+        fleet_id: installation.fleet_id,
         install_key: installation.install_key,
         product_key: installation.product_key,
         app_version: installation.app_version,
+        build_id: installation.build_id,
+        platform: installation.platform,
+        architecture: installation.architecture,
+        package_format: installation.package_format,
+        updater_version: installation.updater_version,
         status: installation.status,
         device_id: installation.device_id,
         created: registered.created,
@@ -620,6 +853,249 @@ async fn installation_deactivate(
         released_activations: outcome.released_activations,
         already_deactivated: outcome.already_deactivated,
     }))
+}
+
+fn update_validation_error(error: UpdateValidationError) -> AppError {
+    AppError::validation(error.message).with_details(json!({ "field": error.field }))
+}
+
+fn update_event_error(error: update_repo::UpdateEventError) -> AppError {
+    match error {
+        update_repo::UpdateEventError::InstallationNotFound => {
+            AppError::not_found("Installation not found.")
+        }
+        update_repo::UpdateEventError::CampaignNotFound => {
+            AppError::not_found("Update campaign not found.")
+        }
+        update_repo::UpdateEventError::ReleaseNotFound => AppError::not_found("Release not found."),
+        update_repo::UpdateEventError::InvalidCampaignRelease => AppError::new(
+            ErrorCode::Conflict,
+            "Update campaign does not target the supplied release.",
+        ),
+        update_repo::UpdateEventError::Db(error) => error.into(),
+    }
+}
+
+fn required_header(headers: &HeaderMap, name: &'static str) -> AppResult<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            AppError::bad_request(format!("{name} header is required."))
+                .with_details(json!({ "field": name }))
+        })
+}
+
+fn optional_header(headers: &HeaderMap, name: &'static str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn parse_uuid_header(value: &str, field: &'static str) -> AppResult<Uuid> {
+    Uuid::parse_str(value).map_err(|_| {
+        AppError::bad_request("header must be a UUID").with_details(json!({ "field": field }))
+    })
+}
+
+fn clean_optional_update_version(
+    value: Option<&str>,
+    field: &'static str,
+) -> AppResult<Option<String>> {
+    clean_app_version(value).map_err(|error| {
+        AppError::validation(error.message).with_details(json!({ "field": field }))
+    })
+}
+
+fn artifact_url(state: &AppState, storage_key: &str) -> AppResult<String> {
+    let storage_key = storage_key.trim();
+    if storage_key.starts_with("https://") || storage_key.starts_with("http://") {
+        return Ok(storage_key.to_string());
+    }
+    let base = state.config.release_artifact_base_url.trim();
+    if base.is_empty() {
+        return Err(AppError::new(
+            ErrorCode::ServiceUnavailable,
+            "Release artifact URL base is not configured.",
+        ));
+    }
+    Ok(format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        storage_key.trim_start_matches('/')
+    ))
+}
+
+async fn authorforge_update_check(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((target, arch, current_version)): Path<(String, String, String)>,
+) -> AppResult<Response> {
+    let customer_id = ctx.require_active()?;
+    let rollout_secret = state.config.update_rollout_secret.trim();
+    if rollout_secret.is_empty() {
+        return Err(AppError::new(
+            ErrorCode::ServiceUnavailable,
+            "Update rollout secret is not configured.",
+        ));
+    }
+
+    let installation_header = required_header(&headers, "x-forge-installation-id")?;
+    let installation_id = parse_uuid_header(&installation_header, "x-forge-installation-id")?;
+    let current_build_id = clean_update_failure_code(
+        optional_header(&headers, "x-forge-build-id").as_deref(),
+        "x-forge-build-id",
+    )
+    .map_err(update_validation_error)?;
+    let updater_version = clean_optional_update_version(
+        optional_header(&headers, "x-forge-updater-version").as_deref(),
+        "x-forge-updater-version",
+    )?;
+    let package_format =
+        clean_update_package_format(optional_header(&headers, "x-forge-package-format").as_deref())
+            .map_err(update_validation_error)?;
+    let platform = clean_update_platform(&target).map_err(update_validation_error)?;
+    let architecture = clean_update_architecture(&arch).map_err(update_validation_error)?;
+    let current_version = clean_optional_update_version(Some(&current_version), "current_version")?
+        .ok_or_else(|| {
+            AppError::validation("current_version is required")
+                .with_details(json!({ "field": "current_version" }))
+        })?;
+
+    let candidates = update_repo::candidate_rows(
+        &state.pool,
+        update_repo::UpdateLookupInput {
+            customer_id,
+            installation_id,
+            product_key: "authorforge",
+            platform: &platform,
+            architecture: &architecture,
+            package_format: &package_format,
+        },
+    )
+    .await?;
+
+    for candidate in candidates {
+        let Some(signature) = candidate
+            .tauri_signature
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some(published_at) = candidate.published_at else {
+            continue;
+        };
+        if !version_greater(&candidate.version, &current_version) {
+            continue;
+        }
+        if let Some(minimum) = candidate.minimum_supported_version.as_deref() {
+            if !version_at_least(&current_version, minimum) {
+                continue;
+            }
+        }
+        if let Some(minimum) = candidate.minimum_updater_version.as_deref() {
+            let Some(updater_version) = updater_version.as_deref() else {
+                continue;
+            };
+            if !version_at_least(updater_version, minimum) {
+                continue;
+            }
+        }
+        if current_build_id.as_deref() == Some(candidate.build_id.as_str()) {
+            continue;
+        }
+        if !rollout_allows(
+            rollout_secret,
+            candidate.campaign_id,
+            installation_id,
+            candidate.rollout_percentage,
+        )
+        .map_err(update_validation_error)?
+        {
+            continue;
+        }
+
+        let response = TauriUpdateResponse {
+            version: candidate.version,
+            url: artifact_url(&state, &candidate.storage_key)?,
+            signature: signature.to_string(),
+            notes: candidate.changelog_markdown,
+            pub_date: published_at.to_rfc3339(),
+        };
+        return Ok(Json(response).into_response());
+    }
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn installation_update_event(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<InstallationUpdateEventRequest>,
+) -> AppResult<Json<Value>> {
+    let customer_id = ctx.require_active()?;
+    let installation_id = parse_path_id(&id)?;
+    let event_id_raw = idempotency_key(&headers)
+        .ok_or_else(|| AppError::bad_request("Update events require an Idempotency-Key header."))?;
+    let event_id = Uuid::parse_str(event_id_raw).map_err(|_| {
+        AppError::bad_request("Idempotency-Key must be the update event UUID.")
+            .with_details(json!({ "field": "idempotency-key" }))
+    })?;
+    let event_type =
+        clean_update_event_type(&request.event_type).map_err(update_validation_error)?;
+    let from_version =
+        clean_optional_update_version(request.from_version.as_deref(), "from_version")?;
+    let to_version = clean_optional_update_version(request.to_version.as_deref(), "to_version")?;
+    let from_build_id =
+        clean_update_failure_code(request.from_build_id.as_deref(), "from_build_id")
+            .map_err(update_validation_error)?;
+    let to_build_id = clean_update_failure_code(request.to_build_id.as_deref(), "to_build_id")
+        .map_err(update_validation_error)?;
+    let failure_code = clean_update_failure_code(request.failure_code.as_deref(), "failure_code")
+        .map_err(update_validation_error)?;
+    let failure_class =
+        clean_update_failure_code(request.failure_class.as_deref(), "failure_class")
+            .map_err(update_validation_error)?;
+    let occurred_at = parse_rfc3339(request.occurred_at.as_deref(), "occurred_at")?
+        .unwrap_or_else(chrono::Utc::now);
+
+    let receipt = update_repo::record_update_event(
+        &state.pool,
+        update_repo::UpdateEventInput {
+            event_id,
+            customer_id,
+            installation_id,
+            campaign_id: request.campaign_id,
+            release_id: request.release_id,
+            event_type: &event_type,
+            from_version: from_version.as_deref(),
+            from_build_id: from_build_id.as_deref(),
+            to_version: to_version.as_deref(),
+            to_build_id: to_build_id.as_deref(),
+            failure_code: failure_code.as_deref(),
+            failure_class: failure_class.as_deref(),
+            occurred_at,
+        },
+    )
+    .await
+    .map_err(update_event_error)?;
+
+    Ok(Json(json!({
+        "event_id": receipt.event_id,
+        "event_type": receipt.event_type,
+        "received": receipt.received,
+    })))
 }
 
 async fn devices_get(
@@ -1092,6 +1568,12 @@ fn admin_error(error: admin::AdminError) -> AppError {
     match error {
         admin::AdminError::CustomerNotFound => AppError::not_found("Customer not found."),
         admin::AdminError::ProductNotFound => AppError::not_found("Unknown or inactive product."),
+        admin::AdminError::FleetNotFound => AppError::not_found("Fleet not found."),
+        admin::AdminError::ReleaseNotFound => AppError::not_found("Release not found."),
+        admin::AdminError::CampaignNotFound => AppError::not_found("Update campaign not found."),
+        admin::AdminError::ArtifactNotFound => AppError::not_found("Release artifact not found."),
+        admin::AdminError::FleetHoldNotFound => AppError::not_found("Fleet hold not found."),
+        admin::AdminError::InvalidState(message) => AppError::new(ErrorCode::Conflict, message),
         admin::AdminError::LicenseNotFound => AppError::not_found("License not found."),
         admin::AdminError::MeterNotFound => AppError::not_found("Unknown usage meter."),
         admin::AdminError::Db(error) => error.into(),
@@ -1184,6 +1666,621 @@ async fn admin_customers(
     )
     .await?;
     Ok(Json(json!({ "customers": customers })))
+}
+
+async fn admin_fleets(
+    _admin: AdminContext,
+    State(state): State<AppState>,
+) -> AppResult<Json<Value>> {
+    let fleets = admin::list_fleets(&state.pool).await?;
+    Ok(Json(json!({ "fleets": fleets })))
+}
+
+async fn admin_fleet(
+    _admin: AdminContext,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let fleet_id = parse_path_id(&id)?;
+    let fleet = admin::read_fleet(&state.pool, fleet_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Fleet not found."))?;
+    Ok(Json(json!({ "fleet": fleet })))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AdminFleetPolicyRequest {
+    display_name: Option<String>,
+    update_ring: Option<String>,
+    release_channel: Option<String>,
+    release_channel_key: Option<String>,
+    beta_enrolled: Option<bool>,
+    reason: String,
+}
+
+async fn admin_fleet_policy(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<AdminFleetPolicyRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    idempotency_key(&headers).ok_or_else(|| {
+        AppError::bad_request("Fleet policy updates require an Idempotency-Key header.")
+    })?;
+    let fleet_id = parse_path_id(&id)?;
+    let display_name = clean_optional_display_name(request.display_name.as_deref())
+        .map_err(admin_validation_error)?;
+    let update_ring = match request.update_ring.as_deref() {
+        Some(value) => Some(clean_update_ring(value).map_err(admin_validation_error)?),
+        None => None,
+    };
+    let channel_raw = request
+        .release_channel
+        .as_deref()
+        .or(request.release_channel_key.as_deref());
+    let release_channel_key = match channel_raw {
+        Some(value) => Some(clean_release_channel_key(value).map_err(admin_validation_error)?),
+        None => None,
+    };
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+    let fleet = admin::update_fleet_policy(
+        &state.pool,
+        admin::UpdateFleetPolicyInput {
+            operator_id: &operator.operator_id,
+            fleet_id,
+            display_name: display_name.as_deref(),
+            update_ring: update_ring.as_deref(),
+            release_channel_key: release_channel_key.as_deref(),
+            beta_enrolled: request.beta_enrolled,
+            reason: &reason,
+            correlation_id: correlation_id(&correlation),
+        },
+    )
+    .await
+    .map_err(admin_error)?;
+    Ok(Json(json!({ "fleet": fleet })))
+}
+
+async fn admin_releases(
+    _admin: AdminContext,
+    State(state): State<AppState>,
+) -> AppResult<Json<Value>> {
+    let releases = admin::list_releases(&state.pool).await?;
+    Ok(Json(json!({ "releases": releases })))
+}
+
+async fn admin_release_create(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    Json(request): Json<AdminReleaseCreateRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    idempotency_key(&headers).ok_or_else(|| {
+        AppError::bad_request("Release registration requires an Idempotency-Key header.")
+    })?;
+    let product_key = entitlements::clean_product_key(Some(&request.product_key))?;
+    let version = clean_release_version(&request.version).map_err(admin_validation_error)?;
+    let build_id = clean_build_id(&request.build_id).map_err(admin_validation_error)?;
+    let channel_raw = request
+        .release_channel
+        .as_deref()
+        .or(request.release_channel_key.as_deref())
+        .unwrap_or("stable");
+    let release_channel_key =
+        clean_release_channel_key(channel_raw).map_err(admin_validation_error)?;
+    let changelog_raw = request
+        .changelog_markdown
+        .as_deref()
+        .or(request.release_notes.as_deref());
+    let changelog_markdown = clean_optional_markdown(changelog_raw, "changelog_markdown", 16_000)
+        .map_err(admin_validation_error)?;
+    let minimum_supported_version = match request.minimum_supported_version.as_deref() {
+        Some(value) => Some(clean_release_version(value).map_err(admin_validation_error)?),
+        None => None,
+    };
+    let minimum_updater_version = match request.minimum_updater_version.as_deref() {
+        Some(value) => Some(clean_release_version(value).map_err(admin_validation_error)?),
+        None => None,
+    };
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+
+    let release = admin::create_release(
+        &state.pool,
+        admin::CreateReleaseInput {
+            operator_id: &operator.operator_id,
+            product_key: &product_key,
+            version: &version,
+            build_id: &build_id,
+            release_channel_key: &release_channel_key,
+            changelog_markdown: changelog_markdown.as_deref(),
+            minimum_supported_version: minimum_supported_version.as_deref(),
+            minimum_updater_version: minimum_updater_version.as_deref(),
+            reason: &reason,
+            correlation_id: correlation_id(&correlation),
+        },
+    )
+    .await
+    .map_err(admin_error)?;
+    Ok(Json(json!({ "release": release })))
+}
+
+async fn admin_release(
+    _admin: AdminContext,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let release_id = parse_path_id(&id)?;
+    let release = admin::read_release(&state.pool, release_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Release not found."))?;
+    Ok(Json(json!({ "release": release })))
+}
+
+async fn admin_release_artifact_register(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<AdminArtifactRegisterRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    idempotency_key(&headers).ok_or_else(|| {
+        AppError::bad_request("Artifact registration requires an Idempotency-Key header.")
+    })?;
+    let release_id = parse_path_id(&id)?;
+    let platform = clean_artifact_platform(&request.platform).map_err(admin_validation_error)?;
+    let architecture =
+        clean_artifact_architecture(&request.architecture).map_err(admin_validation_error)?;
+    let package_format =
+        clean_package_format(&request.package_format).map_err(admin_validation_error)?;
+    let artifact_role =
+        clean_artifact_role(&request.artifact_role).map_err(admin_validation_error)?;
+    let storage_key = clean_storage_key(&request.storage_key).map_err(admin_validation_error)?;
+    let size_bytes = clean_size_bytes(request.size_bytes).map_err(admin_validation_error)?;
+    let sha256 = clean_sha256(&request.sha256).map_err(admin_validation_error)?;
+    let tauri_signature = clean_tauri_signature(request.tauri_signature.as_deref())
+        .map_err(admin_validation_error)?;
+    let signing_key_id =
+        clean_signing_key_id(&request.signing_key_id).map_err(admin_validation_error)?;
+    let os_signature_status =
+        clean_os_signature_status(&request.os_signature_status).map_err(admin_validation_error)?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+
+    let artifact = admin::register_artifact(
+        &state.pool,
+        admin::RegisterArtifactInput {
+            operator_id: &operator.operator_id,
+            release_id,
+            platform: &platform,
+            architecture: &architecture,
+            package_format: &package_format,
+            artifact_role: &artifact_role,
+            storage_key: &storage_key,
+            size_bytes,
+            sha256: &sha256,
+            tauri_signature: tauri_signature.as_deref(),
+            signing_key_id: &signing_key_id,
+            os_signature_status: &os_signature_status,
+            reason: &reason,
+            correlation_id: correlation_id(&correlation),
+        },
+    )
+    .await
+    .map_err(admin_error)?;
+    Ok(Json(json!({ "artifact": artifact })))
+}
+
+async fn admin_release_validate(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<AdminReasonRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    idempotency_key(&headers).ok_or_else(|| {
+        AppError::bad_request("Release validation requires an Idempotency-Key header.")
+    })?;
+    let release_id = parse_path_id(&id)?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+    let release = admin::validate_release(
+        &state.pool,
+        &operator.operator_id,
+        release_id,
+        &reason,
+        correlation_id(&correlation),
+    )
+    .await
+    .map_err(admin_error)?;
+    Ok(Json(json!({ "release": release })))
+}
+
+async fn admin_release_publish(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<AdminReasonRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    idempotency_key(&headers).ok_or_else(|| {
+        AppError::bad_request("Release publication requires an Idempotency-Key header.")
+    })?;
+    let release_id = parse_path_id(&id)?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+    let release = admin::publish_release(
+        &state.pool,
+        &operator.operator_id,
+        release_id,
+        &reason,
+        correlation_id(&correlation),
+    )
+    .await
+    .map_err(admin_error)?;
+    Ok(Json(json!({ "release": release })))
+}
+
+async fn admin_release_block(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<AdminReasonRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    idempotency_key(&headers).ok_or_else(|| {
+        AppError::bad_request("Release block requires an Idempotency-Key header.")
+    })?;
+    let release_id = parse_path_id(&id)?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+    let release = admin::block_release(
+        &state.pool,
+        &operator.operator_id,
+        release_id,
+        &reason,
+        correlation_id(&correlation),
+    )
+    .await
+    .map_err(admin_error)?;
+    Ok(Json(json!({ "release": release })))
+}
+
+async fn admin_update_campaign(
+    _admin: AdminContext,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let campaign_id = parse_path_id(&id)?;
+    let campaign = admin::read_campaign(&state.pool, campaign_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Update campaign not found."))?;
+    Ok(Json(json!({ "campaign": campaign })))
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminCampaignCreateRequest {
+    product_key: String,
+    target_release_id: Uuid,
+    campaign_slug: String,
+    release_channel: Option<String>,
+    release_channel_key: Option<String>,
+    target_update_ring: Option<String>,
+    rollout_percentage: Option<i64>,
+    starts_at: Option<String>,
+    emergency: Option<bool>,
+    reason: String,
+}
+
+async fn admin_update_campaign_create(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    Json(request): Json<AdminCampaignCreateRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    idempotency_key(&headers).ok_or_else(|| {
+        AppError::bad_request("Campaign creation requires an Idempotency-Key header.")
+    })?;
+    let product_key = entitlements::clean_product_key(Some(&request.product_key))?;
+    let campaign_slug =
+        clean_campaign_slug(&request.campaign_slug).map_err(admin_validation_error)?;
+    let channel_raw = request
+        .release_channel
+        .as_deref()
+        .or(request.release_channel_key.as_deref())
+        .unwrap_or("stable");
+    let release_channel_key =
+        clean_release_channel_key(channel_raw).map_err(admin_validation_error)?;
+    let target_update_ring =
+        clean_update_ring(request.target_update_ring.as_deref().unwrap_or("standard"))
+            .map_err(admin_validation_error)?;
+    if clean_rollout_percentage(request.rollout_percentage.unwrap_or(0))
+        .map_err(admin_validation_error)?
+        != 0
+    {
+        return Err(
+            AppError::validation("campaign creation starts at 0% rollout")
+                .with_details(json!({ "field": "rollout_percentage" })),
+        );
+    }
+    let starts_at = parse_rfc3339(request.starts_at.as_deref(), "starts_at")?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+    let campaign = admin::create_campaign(
+        &state.pool,
+        admin::CreateCampaignInput {
+            operator_id: &operator.operator_id,
+            product_key: &product_key,
+            target_release_id: request.target_release_id,
+            campaign_slug: &campaign_slug,
+            release_channel_key: &release_channel_key,
+            target_update_ring: &target_update_ring,
+            starts_at,
+            emergency: request.emergency.unwrap_or(false),
+            reason: &reason,
+            correlation_id: correlation_id(&correlation),
+        },
+    )
+    .await
+    .map_err(admin_error)?;
+    Ok(Json(json!({ "campaign": campaign })))
+}
+
+async fn campaign_reason_mutation<F, Fut>(
+    operator: AdminContext,
+    state: AppState,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    id: String,
+    request: AdminReasonRequest,
+    mutate: F,
+) -> AppResult<Json<Value>>
+where
+    F: FnOnce(AppState, String, Uuid, String, Option<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<admin::AdminCampaignRow, admin::AdminError>>,
+{
+    operator.require_role("admin")?;
+    idempotency_key(&headers).ok_or_else(|| {
+        AppError::bad_request("Campaign mutation requires an Idempotency-Key header.")
+    })?;
+    let campaign_id = parse_path_id(&id)?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+    let correlation = correlation_id(&correlation).map(str::to_string);
+    let campaign = mutate(
+        state,
+        operator.operator_id,
+        campaign_id,
+        reason,
+        correlation,
+    )
+    .await
+    .map_err(admin_error)?;
+    Ok(Json(json!({ "campaign": campaign })))
+}
+
+async fn admin_update_campaign_pause(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<AdminReasonRequest>,
+) -> AppResult<Json<Value>> {
+    campaign_reason_mutation(
+        operator,
+        state,
+        correlation,
+        headers,
+        id,
+        request,
+        |state, operator_id, campaign_id, reason, correlation| async move {
+            admin::pause_campaign(
+                &state.pool,
+                &operator_id,
+                campaign_id,
+                &reason,
+                correlation.as_deref(),
+            )
+            .await
+        },
+    )
+    .await
+}
+
+async fn admin_update_campaign_resume(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<AdminReasonRequest>,
+) -> AppResult<Json<Value>> {
+    campaign_reason_mutation(
+        operator,
+        state,
+        correlation,
+        headers,
+        id,
+        request,
+        |state, operator_id, campaign_id, reason, correlation| async move {
+            admin::resume_campaign(
+                &state.pool,
+                &operator_id,
+                campaign_id,
+                &reason,
+                correlation.as_deref(),
+            )
+            .await
+        },
+    )
+    .await
+}
+
+async fn admin_update_campaign_revoke(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<AdminReasonRequest>,
+) -> AppResult<Json<Value>> {
+    campaign_reason_mutation(
+        operator,
+        state,
+        correlation,
+        headers,
+        id,
+        request,
+        |state, operator_id, campaign_id, reason, correlation| async move {
+            admin::revoke_campaign(
+                &state.pool,
+                &operator_id,
+                campaign_id,
+                &reason,
+                correlation.as_deref(),
+            )
+            .await
+        },
+    )
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminCampaignRolloutRequest {
+    rollout_percentage: i64,
+    reason: String,
+}
+
+async fn admin_update_campaign_rollout(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<AdminCampaignRolloutRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    idempotency_key(&headers).ok_or_else(|| {
+        AppError::bad_request("Rollout changes require an Idempotency-Key header.")
+    })?;
+    let campaign_id = parse_path_id(&id)?;
+    let rollout_percentage =
+        clean_rollout_percentage(request.rollout_percentage).map_err(admin_validation_error)?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+    let campaign = admin::set_campaign_rollout(
+        &state.pool,
+        &operator.operator_id,
+        campaign_id,
+        rollout_percentage,
+        &reason,
+        correlation_id(&correlation),
+    )
+    .await
+    .map_err(admin_error)?;
+    Ok(Json(json!({ "campaign": campaign })))
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminFleetHoldRequest {
+    fleet_id: Uuid,
+    reason: String,
+}
+
+async fn admin_update_campaign_hold_add(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    Path(campaign_id): Path<String>,
+    Json(request): Json<AdminFleetHoldRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    idempotency_key(&headers)
+        .ok_or_else(|| AppError::bad_request("Fleet holds require an Idempotency-Key header."))?;
+    let campaign_id = parse_path_id(&campaign_id)?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+    let hold = admin::add_fleet_hold(
+        &state.pool,
+        &operator.operator_id,
+        campaign_id,
+        request.fleet_id,
+        &reason,
+        correlation_id(&correlation),
+    )
+    .await
+    .map_err(admin_error)?;
+    Ok(Json(json!({ "hold": hold })))
+}
+
+async fn admin_update_campaign_hold_remove(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    Path((campaign_id, fleet_id)): Path<(String, String)>,
+    Json(request): Json<AdminReasonRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    idempotency_key(&headers).ok_or_else(|| {
+        AppError::bad_request("Fleet hold removal requires an Idempotency-Key header.")
+    })?;
+    let campaign_id = parse_path_id(&campaign_id)?;
+    let fleet_id = parse_path_id(&fleet_id)?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+    let hold = admin::remove_fleet_hold(
+        &state.pool,
+        &operator.operator_id,
+        campaign_id,
+        fleet_id,
+        &reason,
+        correlation_id(&correlation),
+    )
+    .await
+    .map_err(admin_error)?;
+    Ok(Json(json!({ "hold": hold })))
+}
+
+async fn admin_update_failures(
+    _admin: AdminContext,
+    State(state): State<AppState>,
+) -> AppResult<Json<Value>> {
+    let failures = admin::list_update_failures(&state.pool).await?;
+    Ok(Json(json!({ "failures": failures })))
+}
+
+async fn admin_release_artifact_quarantine(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<AdminReasonRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    idempotency_key(&headers).ok_or_else(|| {
+        AppError::bad_request("Artifact quarantine requires an Idempotency-Key header.")
+    })?;
+    let artifact_id = parse_path_id(&id)?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+    let artifact = admin::quarantine_artifact(
+        &state.pool,
+        &operator.operator_id,
+        artifact_id,
+        &reason,
+        correlation_id(&correlation),
+    )
+    .await
+    .map_err(admin_error)?;
+    Ok(Json(json!({ "artifact": artifact })))
 }
 
 #[derive(Debug, Deserialize)]

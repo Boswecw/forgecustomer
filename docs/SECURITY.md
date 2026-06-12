@@ -30,11 +30,18 @@
 ## Customer access rules
 
 - A customer may read only its own profile, subscription summary, licenses,
-  installations, entitlement summary, usage summary, consent records, and deletion
-  requests (enforced by RLS, see `docs/`/`0009_rls.sql`).
+  installations, fleet/update eligibility, entitlement summary, usage summary, consent
+  records, and deletion requests (enforced by RLS, see `docs/`/`0009_rls.sql` and
+  `0011_fleet_release_update_domain.sql`).
 - A customer may **not** directly write subscription status, Stripe mappings, licenses,
   entitlement grants/overrides, usage events/totals, commercial audit, outbox events, or
   any admin state.
+- Update rollout uses a server-side HMAC secret. Clients identify only their owned
+  installation; ForgeCustomer resolves fleet assignment and never trusts a fleet id
+  supplied by the client.
+- Public release/download routes expose only published release metadata and validated
+  generic bootstrap artifacts. They do not accept customer ids, fleet ids, install keys,
+  license ids, or personalized artifact selectors.
 
 ## Webhooks
 
@@ -66,6 +73,9 @@ PII classification:
 - Structured **redaction** in logs/tracing for direct PII and secrets.
 - Outbox payloads **prohibit**: email, full name, Stripe customer id, payment details,
   raw webhook payload, password/session info, manuscript content, prompt content.
+- Update outcome receipts accept only bounded enum/code/version fields. Raw diagnostics,
+  arbitrary error messages, paths, hostnames, stack traces, logs, and creative content are
+  not accepted.
 
 ## Hardening checklist
 

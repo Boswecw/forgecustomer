@@ -15,7 +15,8 @@ Customer tokens:
 Admin tokens:
 
 - Separate operator issuer and audience.
-- Separate secret from customer tokens.
+- Ed25519 public-key verification against Forge Command's Token Authority key; no shared
+  admin secret.
 - A customer token cannot authorize an admin route.
 
 If a JWT secret is absent, the validator is marked unconfigured and rejects tokens. That
@@ -31,6 +32,7 @@ Server-side only:
 - `STRIPE_WEBHOOK_SECRET`
 - `ENTITLEMENT_SIGNING_PRIVATE_KEY`
 - `DATAFORGE_SERVICE_TOKEN`
+- `UPDATE_ROLLOUT_SECRET`
 
 Secrets must not appear in clients, logs, docs examples with real values, outbox payloads,
 or repo history.
@@ -68,6 +70,8 @@ Forged snapshots must fail verification. Private signing keys must never be logg
 - Suspended customers receive no privileged product actions.
 - Revoked devices receive no new activations/leases.
 - Ambiguous entitlement state denies cloud/new lease access.
+- Missing update rollout/artifact URL configuration is visible as `503`; normal
+  ineligibility returns `204` without leaking internal campaign state.
 - Local creative access must remain available despite cloud, billing, or DataForge
   outages.
 - DataForge outage degrades to queued outbox delivery, not failed customer transactions.

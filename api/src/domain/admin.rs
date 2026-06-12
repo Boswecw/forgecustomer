@@ -29,6 +29,264 @@ pub fn clean_reason(value: &str) -> Result<String, AdminValidationError> {
     Ok(value.to_string())
 }
 
+pub fn clean_optional_display_name(
+    value: Option<&str>,
+) -> Result<Option<String>, AdminValidationError> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => {
+            if value.len() > 120 {
+                return Err(err("display_name", "must be at most 120 characters"));
+            }
+            if value.chars().any(char::is_control) {
+                return Err(err("display_name", "must not contain control characters"));
+            }
+            Ok(Some(value.to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
+pub fn clean_update_ring(value: &str) -> Result<String, AdminValidationError> {
+    let value = value.trim();
+    if matches!(value, "canary" | "preview" | "standard" | "delayed") {
+        Ok(value.to_string())
+    } else {
+        Err(err(
+            "update_ring",
+            "must be canary, preview, standard, or delayed",
+        ))
+    }
+}
+
+pub fn clean_release_channel_key(value: &str) -> Result<String, AdminValidationError> {
+    let value = value.trim();
+    if value.len() < 2 || value.len() > 40 {
+        return Err(err("release_channel", "must be 2-40 characters"));
+    }
+    if !value
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    {
+        return Err(err(
+            "release_channel",
+            "must contain lowercase letters, digits, hyphen, or underscore",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+pub fn clean_campaign_slug(value: &str) -> Result<String, AdminValidationError> {
+    let value = value.trim();
+    let bytes = value.as_bytes();
+    let valid_start = bytes
+        .first()
+        .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    let valid_body = bytes
+        .iter()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_' || *b == b'-');
+    if (3..=80).contains(&bytes.len()) && valid_start && valid_body {
+        Ok(value.to_string())
+    } else {
+        Err(err(
+            "campaign_slug",
+            "must be 3-80 lowercase letters, digits, hyphen, or underscore",
+        ))
+    }
+}
+
+pub fn clean_rollout_percentage(value: i64) -> Result<i32, AdminValidationError> {
+    if !(0..=100).contains(&value) {
+        return Err(err("rollout_percentage", "must be between 0 and 100"));
+    }
+    i32::try_from(value).map_err(|_| err("rollout_percentage", "must be between 0 and 100"))
+}
+
+pub fn clean_release_version(value: &str) -> Result<String, AdminValidationError> {
+    let value = value.trim();
+    if value.len() > 64 {
+        return Err(err("version", "must be at most 64 characters"));
+    }
+    let mut parts = value.split(['-', '+']);
+    let core = parts.next().unwrap_or_default();
+    let nums: Vec<&str> = core.split('.').collect();
+    if nums.len() != 3 || nums.iter().any(|part| part.is_empty()) {
+        return Err(err("version", "must be SemVer major.minor.patch"));
+    }
+    if nums.iter().any(|part| part.parse::<u64>().is_err()) {
+        return Err(err("version", "must be SemVer major.minor.patch"));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+    {
+        return Err(err(
+            "version",
+            "must contain only letters, numbers, '.', '-', '_', or '+'",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+pub fn clean_build_id(value: &str) -> Result<String, AdminValidationError> {
+    let value = value.trim();
+    if value.len() < 3 || value.len() > 120 {
+        return Err(err("build_id", "must be 3-120 characters"));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+    {
+        return Err(err(
+            "build_id",
+            "must contain only letters, numbers, '.', '-', '_', or ':'",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+pub fn clean_optional_markdown(
+    value: Option<&str>,
+    field: &'static str,
+    max_len: usize,
+) -> Result<Option<String>, AdminValidationError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() > max_len {
+        return Err(err(field, "is too long"));
+    }
+    if value
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t')
+    {
+        return Err(err(field, "must not contain control characters"));
+    }
+    Ok(Some(value.to_string()))
+}
+
+pub fn clean_artifact_role(value: &str) -> Result<String, AdminValidationError> {
+    let value = value.trim();
+    if matches!(value, "bootstrap" | "updater" | "recovery") {
+        Ok(value.to_string())
+    } else {
+        Err(err(
+            "artifact_role",
+            "must be bootstrap, updater, or recovery",
+        ))
+    }
+}
+
+pub fn clean_artifact_platform(value: &str) -> Result<String, AdminValidationError> {
+    let value = value.trim();
+    if matches!(value, "windows" | "linux" | "darwin") {
+        Ok(value.to_string())
+    } else {
+        Err(err("platform", "must be windows, linux, or darwin"))
+    }
+}
+
+pub fn clean_artifact_architecture(value: &str) -> Result<String, AdminValidationError> {
+    let value = value.trim();
+    if matches!(value, "x86_64" | "aarch64" | "i686" | "armv7") {
+        Ok(value.to_string())
+    } else {
+        Err(err(
+            "architecture",
+            "must be x86_64, aarch64, i686, or armv7",
+        ))
+    }
+}
+
+pub fn clean_package_format(value: &str) -> Result<String, AdminValidationError> {
+    let value = value.trim();
+    if value.len() > 40 {
+        return Err(err("package_format", "must be at most 40 characters"));
+    }
+    if value.is_empty()
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        return Err(err(
+            "package_format",
+            "must contain only letters, numbers, '.', '-', or '_'",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+pub fn clean_storage_key(value: &str) -> Result<String, AdminValidationError> {
+    let value = value.trim();
+    if value.len() < 3 || value.len() > 512 {
+        return Err(err("storage_key", "must be 3-512 characters"));
+    }
+    if value.contains("..") || value.chars().any(char::is_control) {
+        return Err(err("storage_key", "must be a bounded immutable object key"));
+    }
+    Ok(value.to_string())
+}
+
+pub fn clean_sha256(value: &str) -> Result<String, AdminValidationError> {
+    let value = value.trim().to_ascii_lowercase();
+    if value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(value)
+    } else {
+        Err(err("sha256", "must be a lowercase 64-character hex digest"))
+    }
+}
+
+pub fn clean_signing_key_id(value: &str) -> Result<String, AdminValidationError> {
+    let value = value.trim();
+    if value.len() < 3 || value.len() > 120 {
+        return Err(err("signing_key_id", "must be 3-120 characters"));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+    {
+        return Err(err(
+            "signing_key_id",
+            "must contain only letters, numbers, '.', '-', '_', or ':'",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+pub fn clean_tauri_signature(value: Option<&str>) -> Result<Option<String>, AdminValidationError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() > 2048 {
+        return Err(err("tauri_signature", "must be at most 2048 characters"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(err(
+            "tauri_signature",
+            "must not contain control characters",
+        ));
+    }
+    Ok(Some(value.to_string()))
+}
+
+pub fn clean_os_signature_status(value: &str) -> Result<String, AdminValidationError> {
+    let value = value.trim();
+    if matches!(value, "verified" | "not_applicable") {
+        Ok(value.to_string())
+    } else {
+        Err(err(
+            "os_signature_status",
+            "must be verified or not_applicable for validated artifact registration",
+        ))
+    }
+}
+
+pub fn clean_size_bytes(value: i64) -> Result<i64, AdminValidationError> {
+    if value <= 0 {
+        return Err(err("size_bytes", "must be positive"));
+    }
+    Ok(value)
+}
+
 /// Device limit for operator-issued licenses. Defaults to a single device; bounded so a
 /// typo cannot issue an effectively unlimited license.
 pub fn clean_device_limit(value: Option<i64>) -> Result<i32, AdminValidationError> {
@@ -136,6 +394,51 @@ mod tests {
         assert!(clean_reason("ab").is_err());
         assert!(clean_reason(&"x".repeat(501)).is_err());
         assert!(clean_reason("bad\u{7}reason").is_err());
+    }
+
+    #[test]
+    fn fleet_and_campaign_controls_are_bounded() {
+        assert_eq!(
+            clean_optional_display_name(Some("  Stable fleet ")).unwrap(),
+            Some("Stable fleet".to_string())
+        );
+        assert!(clean_optional_display_name(Some(&"x".repeat(121))).is_err());
+        assert_eq!(clean_update_ring("standard").unwrap(), "standard");
+        assert!(clean_update_ring("prod").is_err());
+        assert_eq!(clean_release_channel_key("stable").unwrap(), "stable");
+        assert!(clean_release_channel_key("Stable").is_err());
+        assert_eq!(
+            clean_campaign_slug("authorforge-1-0-1").unwrap(),
+            "authorforge-1-0-1"
+        );
+        assert!(clean_campaign_slug("-bad").is_err());
+        assert_eq!(clean_rollout_percentage(10).unwrap(), 10);
+        assert!(clean_rollout_percentage(101).is_err());
+    }
+
+    #[test]
+    fn release_and_artifact_controls_are_bounded() {
+        assert_eq!(clean_release_version("1.2.3").unwrap(), "1.2.3");
+        assert!(clean_release_version("1.2").is_err());
+        assert_eq!(clean_build_id("20260612.abcd").unwrap(), "20260612.abcd");
+        assert!(clean_build_id("../bad").is_err());
+        assert_eq!(clean_artifact_role("bootstrap").unwrap(), "bootstrap");
+        assert!(clean_artifact_role("installer").is_err());
+        assert_eq!(clean_artifact_platform("linux").unwrap(), "linux");
+        assert_eq!(clean_artifact_architecture("x86_64").unwrap(), "x86_64");
+        assert_eq!(clean_package_format("appimage").unwrap(), "appimage");
+        assert!(clean_storage_key("../secret").is_err());
+        assert_eq!(clean_size_bytes(42).unwrap(), 42);
+        assert!(clean_size_bytes(0).is_err());
+        assert_eq!(clean_sha256(&"A".repeat(64)).unwrap(), "a".repeat(64));
+        assert!(clean_sha256("not-a-digest").is_err());
+        assert_eq!(clean_signing_key_id("tauri-key-1").unwrap(), "tauri-key-1");
+        assert_eq!(
+            clean_tauri_signature(Some("sig")).unwrap(),
+            Some("sig".to_string())
+        );
+        assert_eq!(clean_os_signature_status("verified").unwrap(), "verified");
+        assert!(clean_os_signature_status("pending").is_err());
     }
 
     #[test]

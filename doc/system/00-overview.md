@@ -67,16 +67,14 @@ Implemented today:
 - Supabase migrations for identity, catalog, commerce, licensing, entitlements, usage,
   audit/outbox, privacy, RLS, seed constraints, and fleet/release/update domains.
 - CI for Rust formatting, clippy, tests, migration determinism, RLS coverage,
-  release package publication smoke, OpenAPI linting, schema parsing, secret scan,
-  and dependency audit.
+  release package publication smoke, update-campaign HTTP smoke, OpenAPI linting,
+  schema parsing, secret scan, and dependency audit.
 
 Every customer, webhook, and admin route is implemented; no handler returns
 `NOT_IMPLEMENTED`. Still pending before AuthorForge can rely on the service end to end:
 
 - CI-runnable DB-backed end-to-end suites (the live local verification suites covering
   licensing, entitlements, usage, admin, and deletion are the blueprint).
-- Broader end-to-end update-campaign tests driven through HTTP plus live PostgreSQL,
-  including version-minimum and deterministic rollout bucket scenarios.
 
 ### Repository map
 

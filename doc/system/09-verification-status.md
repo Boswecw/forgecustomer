@@ -73,6 +73,9 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
   packages, verifies checksum and size evidence, publishes release/artifact metadata
   into PostgreSQL, starts the real API, and proves the public bootstrap lookup returns
   the expected artifact URL.
+- The CI update-campaign HTTP smoke job starts the real API against live PostgreSQL,
+  mints a customer JWT, and proves Tauri response shape, same-version/same-build 204s,
+  minimum supported/updater version gates, and deterministic rollout bucket behavior.
 - Valid operator token reaches admin reads and then fails on the unreachable test
   database, proving auth clears before data access.
 - Public health route requires no token.
@@ -90,8 +93,6 @@ These are intentional MVP gaps and should not be hidden by documentation:
 - End-to-end suites with live or mocked Stripe/Supabase/DataForge flows in CI. The live
   local verification suites (174 checks across licensing, entitlements, usage, admin,
   and deletion against PostgreSQL 16 with a mocked Stripe API) are the blueprint.
-- Broader end-to-end update campaign tests driven through HTTP plus a live PostgreSQL
-  fixture, including version-minimum and deterministic rollout bucket scenarios.
 
 ### Release standard
 

@@ -942,6 +942,7 @@ required variables fail startup. Empty token-verification secrets fail token val
 | `HOST` | no | `0.0.0.0` | Bind host. |
 | `PORT` | no | `8080` | Bind port. |
 | `DATABASE_URL` | yes | none | Postgres/Supabase database URL. |
+| `DATABASE_ACQUIRE_TIMEOUT_SECS` | no | `30` | Connection-pool acquire timeout in seconds. |
 | `SUPABASE_JWT_ISSUER` | yes | none | Customer JWT issuer. |
 | `SUPABASE_JWT_AUDIENCE` | no | `authenticated` | Customer JWT audience. |
 | `SUPABASE_JWT_SECRET` | required to accept customer tokens | empty | Customer JWT HS256 verification secret. |
@@ -950,6 +951,7 @@ required variables fail startup. Empty token-verification secrets fail token val
 | `ADMIN_JWT_PUBLIC_KEY` | required to accept admin tokens | empty | PEM-encoded Ed25519 (SPKI) **public** key that verifies operator JWTs minted by Forge Command. No shared secret. |
 | `STRIPE_SECRET_KEY` | required for checkout/webhook work | empty | Stripe API secret. |
 | `STRIPE_WEBHOOK_SECRET` | required for webhook work | empty | Stripe webhook verification secret. |
+| `STRIPE_API_BASE` | no | `https://api.stripe.com` | Stripe REST API base URL; override to target a mock or test gateway. |
 | `ENTITLEMENT_SIGNING_PRIVATE_KEY` | yes | none | Base64 Ed25519 seed for snapshot signing. |
 | `ENTITLEMENT_SIGNING_KEY_ID` | no | `entitlement-key-1` | Published signing key ID. |
 | `DATAFORGE_API_URL` | no | empty | Enables outbox worker when set. |
@@ -958,6 +960,9 @@ required variables fail startup. Empty token-verification secrets fail token val
 | `RELEASE_ARTIFACT_BASE_URL` | required for relative artifact keys | empty | Prefix used when `release_artifacts.storage_key` is not already an absolute URL. |
 | `ENTITLEMENT_SNAPSHOT_TTL_HOURS` | no | `24` | Snapshot lifetime. |
 | `OFFLINE_GRACE_DAYS` | no | `14` | Offline grace window. |
+| `DELETION_COOLING_OFF_DAYS` | no | `14` | Cooling-off window in days before a verified deletion request may be processed. |
+| `USAGE_RESERVATION_TTL_SECS` | no | `900` | Lifetime of an uncommitted usage reservation before it expires and is swept. |
+| `USAGE_THRESHOLD_PERCENTS` | no | `80,100` | Comma-separated usage percentages that emit threshold outbox events. |
 | `REQUEST_TIMEOUT_SECS` | no | `30` | Per-request deadline enforced by the router; expiry returns `503`. |
 | `MAX_BODY_BYTES` | no | `1048576` | Request body cap enforced by the router; oversized bodies return `413`. |
 | `RATE_LIMIT_PER_MINUTE` | no | `300` | Per-client (per-IP) request budget per minute; exceeding it returns `429 RATE_LIMITED` with `retry-after`. `0` disables. |

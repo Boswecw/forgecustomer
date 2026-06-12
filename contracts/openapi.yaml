@@ -619,6 +619,28 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { description: No active checkout plan matched the request }
         "422": { description: Checkout request validation failed }
+  /v1/billing-portal:
+    post:
+      tags: [checkout]
+      summary: Create a Stripe Billing Customer Portal session
+      description: >
+        Self-service subscription management door. Mints a Stripe-hosted portal session for the
+        caller's linked Stripe customer; persists nothing and changes no commercial truth (the
+        resulting cancel/switch reprojects via the verified webhook path).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BillingPortalRequest" }
+      responses:
+        "200":
+          description: Stripe-hosted portal URL (does NOT mutate subscription truth)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BillingPortalResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: "NO_BILLING_ACCOUNT — caller has no Stripe customer yet" }
+        "422": { description: return_url validation failed }
   /v1/webhooks/stripe:
     post:
       tags: [webhooks]
@@ -1333,6 +1355,24 @@ components:
         stripe_checkout_session_id: { type: string, examples: ["cs_test_123"] }
         checkout_url: { type: string, format: uri }
         status: { type: string, examples: ["created"] }
+    BillingPortalRequest:
+      type: object
+      additionalProperties: false
+      required: [return_url]
+      properties:
+        return_url:
+          type: string
+          format: uri
+          description: Where Stripe returns the customer after the portal session.
+          examples: ["https://boswelldigitalsolutions.com/account.html"]
+    BillingPortalResponse:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Stripe-hosted Billing Portal URL for the browser to follow.
     License:
       type: object
       required: [id, product_key, status, device_limit, active_devices, issued_at]

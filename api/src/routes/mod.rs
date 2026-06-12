@@ -31,7 +31,7 @@ use crate::domain::admin::{
     clean_signing_key_id, clean_size_bytes, clean_storage_key, clean_tauri_signature,
     clean_update_ring,
 };
-use crate::domain::checkout::{validate_checkout_input, CheckoutInput};
+use crate::domain::checkout::{validate_checkout_input, validate_return_url, CheckoutInput};
 use crate::domain::customer::{
     normalize_email_claim, validate_provision_profile, ProvisionProfileInput,
 };
@@ -47,8 +47,8 @@ use crate::domain::usage::{
 };
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::integrations::stripe::{
-    create_checkout_session, fetch_subscription, parse_event, verify_signature, CheckoutError,
-    CheckoutSessionRequest, SubscriptionFetchError, WebhookError,
+    create_billing_portal_session, create_checkout_session, fetch_subscription, parse_event,
+    verify_signature, CheckoutError, CheckoutSessionRequest, SubscriptionFetchError, WebhookError,
 };
 use crate::middleware as mw;
 use crate::repositories::commerce::{StripeWebhookApplyError, StripeWebhookRecordOutcome};
@@ -125,7 +125,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/usage/commit", post(usage_commit))
         .route("/v1/usage/release", post(usage_release))
         .route("/v1/usage/current", get(usage_current))
-        .route("/v1/checkout", post(checkout_create));
+        .route("/v1/checkout", post(checkout_create))
+        .route("/v1/billing-portal", post(billing_portal_create));
 
     let webhooks = Router::new().route("/v1/webhooks/stripe", post(stripe_webhook));
 
@@ -408,6 +409,16 @@ struct CheckoutCreateResponse {
     stripe_checkout_session_id: String,
     checkout_url: String,
     status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BillingPortalRequest {
+    return_url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BillingPortalResponse {
+    url: String,
 }
 
 fn stripe_webhook_error(error: WebhookError) -> AppError {
@@ -1514,6 +1525,45 @@ async fn checkout_create(
         checkout_url: stripe_session.url,
         status: checkout.status,
     }))
+}
+
+/// Mint a Stripe Billing Customer Portal session so the customer can self-manage their
+/// subscription (cancel, switch plan, update payment method) on Stripe's hosted page. This is a
+/// door, not a mutation: no commercial truth changes here — any resulting change reprojects via
+/// the verified Stripe webhook path. Requires a Stripe customer linkage (a prior paid checkout);
+/// free-baseline customers get `409 NO_BILLING_ACCOUNT`.
+async fn billing_portal_create(
+    ctx: CustomerContext,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<BillingPortalRequest>,
+) -> AppResult<Json<BillingPortalResponse>> {
+    let customer_id = ctx.require_active()?;
+    let return_url = validate_return_url(&request.return_url).map_err(|err| {
+        AppError::validation(err.message).with_details(json!({ "field": err.field }))
+    })?;
+
+    let stripe_customer_id = commerce::find_stripe_customer_id(&state.pool, customer_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::new(
+                ErrorCode::NoBillingAccount,
+                "No billing account yet. Subscribe before managing billing.",
+            )
+        })?;
+
+    let session = create_billing_portal_session(
+        &state.http,
+        &state.config.stripe_api_base,
+        &state.config.stripe_secret_key,
+        &stripe_customer_id,
+        &return_url,
+        idempotency_key(&headers),
+    )
+    .await
+    .map_err(stripe_checkout_error)?;
+
+    Ok(Json(BillingPortalResponse { url: session.url }))
 }
 
 // --- Stripe webhook (no JWT; signature verified in the handler) ------------

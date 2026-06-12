@@ -43,6 +43,28 @@ The browser redirect **does not** activate entitlements. Checkout requests resol
 active `plan_versions.stripe_price_id` server-side; customers cannot submit arbitrary
 Stripe price ids.
 
+## Self-service management (Billing Portal)
+
+```
+Client → POST /v1/billing-portal { return_url }
+  → API resolves the caller's linked Stripe customer
+      (stripe_customers → billing_accounts; 409 NO_BILLING_ACCOUNT if none)
+  → API creates a Stripe Billing Customer Portal session (server-side, secret key)
+  → returns { url } for the browser to follow
+  → customer cancels / switches plan / updates card on Stripe's hosted page
+  → Stripe fires customer.subscription.updated / .deleted
+  → existing webhook flow reprojects subscription truth + re-syncs the license
+```
+
+The portal session is a **door, not a mutation**: ForgeCustomer persists nothing and changes
+no subscription truth at this call — only the verified webhook reprojects the result. No
+bespoke cancel/plan-change endpoints exist; Stripe owns that surface.
+
+> **Operational prerequisite:** the Stripe **Customer Portal must be enabled per environment**
+> (Stripe Dashboard → Settings → Billing → Customer portal, for both test and live) before
+> `POST /v1/billing_portal/sessions` succeeds. With it disabled, `/v1/billing-portal` surfaces a
+> `SERVICE_UNAVAILABLE` from the Stripe call.
+
 ## Webhook flow
 
 ```

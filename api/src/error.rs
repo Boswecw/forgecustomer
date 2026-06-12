@@ -18,6 +18,7 @@ pub enum ErrorCode {
     CustomerSuspended,
     NotFound,
     Conflict,
+    NoBillingAccount,
     IdempotencyReplay,
     ValidationFailed,
     QuotaExceeded,
@@ -41,6 +42,7 @@ impl ErrorCode {
             ErrorCode::CustomerSuspended => "CUSTOMER_SUSPENDED",
             ErrorCode::NotFound => "NOT_FOUND",
             ErrorCode::Conflict => "CONFLICT",
+            ErrorCode::NoBillingAccount => "NO_BILLING_ACCOUNT",
             ErrorCode::IdempotencyReplay => "IDEMPOTENCY_REPLAY",
             ErrorCode::ValidationFailed => "VALIDATION_FAILED",
             ErrorCode::QuotaExceeded => "QUOTA_EXCEEDED",
@@ -64,7 +66,9 @@ impl ErrorCode {
             }
             ErrorCode::BadRequest => StatusCode::BAD_REQUEST,
             ErrorCode::NotFound => StatusCode::NOT_FOUND,
-            ErrorCode::Conflict | ErrorCode::IdempotencyReplay => StatusCode::CONFLICT,
+            ErrorCode::Conflict | ErrorCode::NoBillingAccount | ErrorCode::IdempotencyReplay => {
+                StatusCode::CONFLICT
+            }
             ErrorCode::ValidationFailed => StatusCode::UNPROCESSABLE_ENTITY,
             ErrorCode::QuotaExceeded | ErrorCode::DeviceLimitReached => {
                 StatusCode::PAYMENT_REQUIRED

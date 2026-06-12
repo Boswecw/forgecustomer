@@ -31,7 +31,7 @@ All errors share this shape:
 
 Representative codes: `UNAUTHENTICATED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`,
 `WRONG_AUDIENCE`, `FORBIDDEN`, `BAD_REQUEST`, `CUSTOMER_SUSPENDED`, `NOT_FOUND`, `CONFLICT`,
-`IDEMPOTENCY_REPLAY`, `VALIDATION_FAILED`, `QUOTA_EXCEEDED`, `DEVICE_LIMIT_REACHED`,
+`NO_BILLING_ACCOUNT`, `IDEMPOTENCY_REPLAY`, `VALIDATION_FAILED`, `QUOTA_EXCEEDED`, `DEVICE_LIMIT_REACHED`,
 `REVOKED`, `RATE_LIMITED`, `INTERNAL`.
 
 ## Route groups
@@ -53,6 +53,7 @@ Representative codes: `UNAUTHENTICATED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`,
 | `/v1/entitlements`     | current / check / offline-lease                     | customer  |
 | `/v1/usage`            | check / reserve / commit / release / current        | customer  |
 | `/v1/checkout`         | create Stripe Checkout session                      | customer  |
+| `/v1/billing-portal`   | create Stripe Billing Portal session (self-service) | customer  |
 | `/v1/webhooks/stripe`  | Stripe webhook receiver                             | signature |
 | `/v1/admin/*`          | operator administration                             | operator  |
 
@@ -202,6 +203,22 @@ The response returns the Stripe-hosted checkout URL and records
 `stripe_checkout_session_id` in `checkout_sessions` with status `created`. This does
 **not** activate entitlements; verified Stripe webhooks remain the only path that changes
 subscription truth.
+
+## Billing portal (self-service subscription management)
+
+`POST /v1/billing-portal` mints a **Stripe Billing Customer Portal** session so an active
+customer can cancel, switch plan, or update their payment method on Stripe's hosted page.
+The caller submits only a `return_url`:
+
+```json
+{ "return_url": "https://boswelldigitalsolutions.com/account.html" }
+```
+
+The response is `{ "url": "https://billing.stripe.com/..." }`. The call **persists nothing
+and changes no subscription truth** — like checkout, the door is inert; the customer's
+resulting cancel/downgrade reprojects only through verified Stripe webhooks. A customer with
+no Stripe customer yet (free baseline / never paid) gets `409 NO_BILLING_ACCOUNT`. Requires
+the Stripe Customer Portal to be enabled for the environment (see `docs/STRIPE.md`).
 
 ## Usage: check, reserve, commit, release, current
 

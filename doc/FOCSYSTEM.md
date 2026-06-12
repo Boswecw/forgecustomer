@@ -342,6 +342,7 @@ Current route surface:
 - `POST /v1/usage/release`
 - `GET /v1/usage/current`
 - `POST /v1/checkout`
+- `POST /v1/billing-portal`
 
 `POST /v1/account/provision` creates or returns the caller's business customer profile
 idempotently, writes the initial status-history receipt, and queues the sanitized
@@ -393,6 +394,16 @@ bounded update outcome receipts keyed by UUID `Idempotency-Key`.
 catalog plan server-side, creates a Stripe Checkout Session, stores the returned Stripe
 session id in `checkout_sessions`, and returns the hosted checkout URL. It does not
 activate subscriptions or entitlements.
+
+`POST /v1/billing-portal` is the self-service subscription-management door for active
+customers (cancel, switch plan, update payment method). It validates the `return_url`,
+resolves the caller's linked Stripe customer, mints a **Stripe Billing Customer Portal**
+session, and returns `{ "url": ... }` for the browser to follow. It is a *door, not a
+mutation*: nothing is persisted and no commercial state changes here — any change the
+customer makes in the portal reprojects into ForgeCustomer truth only through the verified
+Stripe webhook path. A customer with no Stripe linkage yet (free baseline / never paid)
+gets `409 NO_BILLING_ACCOUNT`. Requires the Stripe Customer Portal to be enabled for the
+environment (see `docs/STRIPE.md`).
 
 ### Admin routes
 
@@ -480,6 +491,7 @@ FORBIDDEN
 CUSTOMER_SUSPENDED
 NOT_FOUND
 CONFLICT
+NO_BILLING_ACCOUNT
 IDEMPOTENCY_REPLAY
 VALIDATION_FAILED
 QUOTA_EXCEEDED
@@ -611,6 +623,14 @@ supported checkout/subscription/invoice events in one transaction. Subscription 
 write normalized projection rows, commercial audit, and sanitized `subscription_changed`
 outbox events. Only verified Stripe webhooks may change subscription truth; browser
 redirects must only confirm that the customer returned from Stripe.
+
+Self-service subscription management is offered through the **Stripe Billing Customer
+Portal**, not bespoke endpoints. `POST /v1/billing-portal` resolves the caller's linked
+Stripe customer (via `stripe_customers` → `billing_accounts`) and mints a portal session;
+the customer cancels, switches plan, or updates payment on Stripe's hosted page. This keeps
+the invariant intact — the door changes nothing, and the resulting cancel/downgrade flows
+back through the existing webhook path that reprojects subscription truth and re-syncs the
+linked license. A customer with no Stripe linkage yet returns `NO_BILLING_ACCOUNT`.
 
 ### Licensing and installations
 

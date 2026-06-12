@@ -143,6 +143,68 @@ pub async fn create_checkout_session(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BillingPortalSession {
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct StripeBillingPortalResponse {
+    url: Option<String>,
+}
+
+/// Create a Stripe Billing Customer Portal session for an existing Stripe customer.
+///
+/// The portal is Stripe-hosted and lets the customer cancel, switch plans, or update their
+/// payment method. Any resulting change is applied to ForgeCustomer truth only via the verified
+/// webhook path — this call mints an ephemeral session and persists nothing. Reuses
+/// `CheckoutError` so HTTP mapping stays consistent with checkout (`stripe_checkout_error`).
+pub async fn create_billing_portal_session(
+    http: &reqwest::Client,
+    api_base: &str,
+    secret_key: &str,
+    stripe_customer_id: &str,
+    return_url: &str,
+    idempotency_key: Option<&str>,
+) -> Result<BillingPortalSession, CheckoutError> {
+    if secret_key.is_empty() {
+        return Err(CheckoutError::NotConfigured);
+    }
+
+    let form = vec![
+        ("customer".to_string(), stripe_customer_id.to_string()),
+        ("return_url".to_string(), return_url.to_string()),
+    ];
+    let mut builder = http
+        .post(format!(
+            "{}/v1/billing_portal/sessions",
+            api_base.trim_end_matches('/')
+        ))
+        .bearer_auth(secret_key)
+        .form(&form);
+
+    if let Some(key) = idempotency_key.filter(|key| !key.trim().is_empty()) {
+        builder = builder.header("Idempotency-Key", key.trim());
+    }
+
+    let response = builder
+        .send()
+        .await
+        .map_err(|error| CheckoutError::Transport(error.to_string()))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(CheckoutError::ApiStatus(status.as_u16()));
+    }
+
+    let session: StripeBillingPortalResponse = response
+        .json()
+        .await
+        .map_err(|error| CheckoutError::Transport(error.to_string()))?;
+    Ok(BillingPortalSession {
+        url: session.url.ok_or(CheckoutError::MissingCheckoutUrl)?,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StripeWebhookReceiptStatus {
     Received,
     Ignored,
@@ -593,6 +655,22 @@ mod tests {
             "subscription_data[metadata][plan_version_id]".into(),
             "plan_version_uuid".into()
         )));
+    }
+
+    #[tokio::test]
+    async fn billing_portal_session_requires_secret_key() {
+        // Empty secret fails closed before any network call (mirrors checkout).
+        let err = create_billing_portal_session(
+            &reqwest::Client::new(),
+            "https://api.stripe.test",
+            "",
+            "cus_123",
+            "https://example.com/account.html",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CheckoutError::NotConfigured));
     }
 
     #[test]

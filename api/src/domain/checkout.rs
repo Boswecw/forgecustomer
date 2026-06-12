@@ -71,9 +71,28 @@ pub fn validate_checkout_input(
     })
 }
 
+/// Validate a Billing Portal `return_url` — the same http/https + length rules as the checkout
+/// redirect targets. The browser-facing same-origin lock is enforced by the website BFF; this
+/// guards the ForgeCustomer boundary against non-URL / oversized input.
+pub fn validate_return_url(value: &str) -> Result<String, CheckoutValidationError> {
+    clean_checkout_url(value, "return_url")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_return_url_rejects_non_http() {
+        let err = validate_return_url("ftp://example.com/account").expect_err("invalid url");
+        assert_eq!(err.field, "return_url");
+    }
+
+    #[test]
+    fn validate_return_url_accepts_https_and_trims() {
+        let url = validate_return_url(" https://example.com/account.html ").expect("valid url");
+        assert_eq!(url, "https://example.com/account.html");
+    }
 
     #[test]
     fn defaults_product_key_and_trims_fields() {

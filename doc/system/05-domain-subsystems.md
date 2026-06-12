@@ -38,6 +38,14 @@ write normalized projection rows, commercial audit, and sanitized `subscription_
 outbox events. Only verified Stripe webhooks may change subscription truth; browser
 redirects must only confirm that the customer returned from Stripe.
 
+Self-service subscription management is offered through the **Stripe Billing Customer
+Portal**, not bespoke endpoints. `POST /v1/billing-portal` resolves the caller's linked
+Stripe customer (via `stripe_customers` → `billing_accounts`) and mints a portal session;
+the customer cancels, switches plan, or updates payment on Stripe's hosted page. This keeps
+the invariant intact — the door changes nothing, and the resulting cancel/downgrade flows
+back through the existing webhook path that reprojects subscription truth and re-syncs the
+linked license. A customer with no Stripe linkage yet returns `NO_BILLING_ACCOUNT`.
+
 ### Licensing and installations
 
 The model keeps licenses, installations, devices, activations, leases, and revocations as

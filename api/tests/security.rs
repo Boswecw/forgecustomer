@@ -577,6 +577,21 @@ async fn usage_routes_require_customer_auth() {
 }
 
 #[tokio::test]
+async fn billing_portal_requires_customer_auth() {
+    // The self-service Billing Portal door is a customer route — it must fail closed
+    // without a customer token, before any Stripe call or DB lookup.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/billing-portal")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "return_url": "https://example.com/account.html" }).to_string(),
+        ))
+        .unwrap();
+    assert_eq!(status_of(req).await, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn parameterized_admin_routes_match_and_require_auth() {
     let id = "9f1c2d3e-4b5a-6789-0abc-def012345678";
     for uri in [

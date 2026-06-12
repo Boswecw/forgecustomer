@@ -1013,6 +1013,27 @@ pub async fn list_customer_subscriptions(
     .await
 }
 
+/// Resolve the Stripe customer id linked to a ForgeCustomer customer, if any. A linkage
+/// exists once the customer has completed at least one paid checkout (the webhook path stores
+/// it via `link_stripe_customer`). `None` means the customer has no billing account yet, so a
+/// Billing Portal session cannot be minted.
+pub async fn find_stripe_customer_id(
+    pool: &PgPool,
+    customer_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar::<_, String>(
+        r#"
+        select sc.stripe_customer_id
+        from public.stripe_customers sc
+        join public.billing_accounts ba on ba.id = sc.billing_account_id
+        where ba.customer_id = $1
+        "#,
+    )
+    .bind(customer_id)
+    .fetch_optional(pool)
+    .await
+}
+
 // --- Admin resync (operator-driven; Forge Command surface) ---------------------
 
 /// Subscription identifiers needed to pull current truth from Stripe.

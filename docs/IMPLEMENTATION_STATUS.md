@@ -23,7 +23,7 @@ same change as implementation.
 | 10 | Admin API | ✅ | Forge Command surface live: customers, fleets, releases, campaigns, holds, update failures, artifact quarantine, suspend/restore, Stripe resync, license issue/revoke, entitlement override, usage adjust, audit read; mutations require the `admin` role + reason + idempotency where retryable |
 | 11 | DataForge outbox | ✅ | outbox table + worker (backoff/dead-letter) + sanitizing client; every contract emit site live (customer_created/anonymized, subscription_changed, installation_registered, license_activated/revoked, customer_suspended/restored, quota_threshold_reached, usage_commit_failed) |
 | 12 | Privacy & deletion | ✅ | deletion workflow live end to end: customer request/cancel, operator advance/reject/execute, non-destructive cooling-off, anonymization transaction with receipt + customer_anonymized emit; anonymized accounts fail closed |
-| 13 | Fleet/update foundation | 🟡 | default fleet/backfill/RLS, release/artifact/campaign/hold/outcome tables, release/artifact registration, public bootstrap lookup, admin control API, deterministic rollout, Tauri update lookup, bounded update-event receipts, and CI DB-backed eligibility matrix live; release-pipeline package/upload smoke tests pending |
+| 13 | Fleet/update foundation | ✅ | default fleet/backfill/RLS, release/artifact/campaign/hold/outcome tables, release/artifact registration, public bootstrap lookup, admin control API, deterministic rollout, Tauri update lookup, bounded update-event receipts, CI DB-backed eligibility matrix, and release package publication smoke proof live |
 | 18 | RLS | ✅ | enabled on all tables; read-own + public-catalog policies; CI asserts coverage |
 | 19 | Security hardening | ✅ | JWT issuer/audience/exp, constant-time webhook verify, key rotation, security headers, request timeout + body-size cap, per-client rate limiting, hardened correlation ids, cargo-audit in CI |
 | 21 | Testing | 🟡 | 104 unit + 30 security integration tests; CI-runnable DB-backed e2e suites deferred (see `tests/README.md`) |
@@ -45,13 +45,16 @@ same change as implementation.
 5. ✅ Deletion workflow (customer request/cancel; operator advance/reject/execute with
    anonymization receipt) + every contract outbox emit site incl. `customer_anonymized`
    (Phases 11–12), plus the subscription summary endpoint.
-6. 🟡 AuthorForge fleet/update foundation: default fleet assignment, release/campaign
+6. ✅ AuthorForge fleet/update foundation: default fleet assignment, release/campaign
    admin control, deterministic rollout, Tauri update lookup, and bounded update-event
    receipts are implemented. Release-pipeline metadata/artifact registration and public
    generic installer lookup are implemented. A CI DB-backed eligibility matrix covers
    held fleets, campaign holds, paused/revoked campaigns, unpublished releases,
    quarantined artifacts, updater-vs-bootstrap artifact role separation, cross-customer
-   lookups, and duplicate update-event receipts. Remaining: package/upload smoke proof.
+   lookups, and duplicate update-event receipts. The release-pipeline smoke job creates
+   immutable bootstrap/updater fixture packages, verifies checksum/size evidence,
+   publishes release metadata, and proves the public bootstrap lookup returns the
+   expected artifact URL.
 7. Remaining: CI-runnable DB-backed end-to-end suites for Stripe/Supabase/DataForge
    happy paths and failures (the live local suites — 174 checks across Phases 6/7/8/10/12
    — are the blueprint; see `tests/README.md`).

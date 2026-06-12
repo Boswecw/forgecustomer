@@ -65,6 +65,10 @@ Migration and RLS validation require PostgreSQL or the CI migration job.
   routes fail closed without auth.
 - Public release distribution routes require no token and reach the data layer without
   accepting customer, fleet, or personalized artifact input.
+- The CI migration job runs a DB-backed AuthorForge update eligibility matrix covering
+  held fleets, campaign holds, paused/revoked campaigns, unpublished releases,
+  quarantined artifacts, updater-vs-bootstrap artifact role separation, cross-customer
+  installation lookups, and duplicate update-event receipt idempotency.
 - Valid operator token reaches admin reads and then fails on the unreachable test
   database, proving auth clears before data access.
 - Public health route requires no token.
@@ -84,9 +88,8 @@ These are intentional MVP gaps and should not be hidden by documentation:
   and deletion against PostgreSQL 16 with a mocked Stripe API) are the blueprint.
 - Release-pipeline package/upload smoke tests that prove an actual installer/updater
   artifact can be uploaded, registered, and served through the public bootstrap lookup.
-- DB-backed update eligibility matrix tests for held fleets, paused/revoked campaigns,
-  unpublished/quarantined artifacts, cross-customer installation lookups, and duplicate
-  update-event receipts.
+- Broader end-to-end update campaign tests driven through HTTP plus a live PostgreSQL
+  fixture, including version-minimum and deterministic rollout bucket scenarios.
 
 ### Release standard
 

@@ -33,21 +33,7 @@ pub struct UpdateCandidateRow {
     pub rollout_percentage: i32,
 }
 
-pub struct UpdateLookupInput<'a> {
-    pub customer_id: Uuid,
-    pub installation_id: Uuid,
-    pub product_key: &'a str,
-    pub platform: &'a str,
-    pub architecture: &'a str,
-    pub package_format: &'a str,
-}
-
-pub async fn candidate_rows(
-    pool: &PgPool,
-    input: UpdateLookupInput<'_>,
-) -> Result<Vec<UpdateCandidateRow>, sqlx::Error> {
-    sqlx::query_as::<_, UpdateCandidateRow>(
-        r#"
+const CANDIDATE_ROWS_SQL: &str = r#"
         select c.id as campaign_id,
                r.id as release_id,
                r.version,
@@ -88,6 +74,7 @@ pub async fn candidate_rows(
           and (c.starts_at is null or c.starts_at <= now())
           and r.status = 'published'
           and a.status = 'validated'
+          and a.artifact_role = 'updater'
           and a.platform = $4
           and a.architecture = $5
           and a.package_format = $6
@@ -98,16 +85,30 @@ pub async fn candidate_rows(
           )
         order by c.emergency desc, c.created_at desc
         limit 20
-        "#,
-    )
-    .bind(input.customer_id)
-    .bind(input.installation_id)
-    .bind(input.product_key)
-    .bind(input.platform)
-    .bind(input.architecture)
-    .bind(input.package_format)
-    .fetch_all(pool)
-    .await
+        "#;
+
+pub struct UpdateLookupInput<'a> {
+    pub customer_id: Uuid,
+    pub installation_id: Uuid,
+    pub product_key: &'a str,
+    pub platform: &'a str,
+    pub architecture: &'a str,
+    pub package_format: &'a str,
+}
+
+pub async fn candidate_rows(
+    pool: &PgPool,
+    input: UpdateLookupInput<'_>,
+) -> Result<Vec<UpdateCandidateRow>, sqlx::Error> {
+    sqlx::query_as::<_, UpdateCandidateRow>(CANDIDATE_ROWS_SQL)
+        .bind(input.customer_id)
+        .bind(input.installation_id)
+        .bind(input.product_key)
+        .bind(input.platform)
+        .bind(input.architecture)
+        .bind(input.package_format)
+        .fetch_all(pool)
+        .await
 }
 
 #[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
@@ -309,4 +310,14 @@ pub async fn record_update_event(
         event_type: input.event_type.to_string(),
         received: inserted.is_some(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CANDIDATE_ROWS_SQL;
+
+    #[test]
+    fn candidate_query_requires_updater_artifacts() {
+        assert!(CANDIDATE_ROWS_SQL.contains("a.artifact_role = 'updater'"));
+    }
 }

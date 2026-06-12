@@ -60,6 +60,8 @@ jobs:
           $PSQL -d fc -t -c "select count(*) from pg_tables t join pg_class c on c.relname = t.tablename where t.schemaname='public' and c.relrowsecurity = false;" | tr -d ' ' > /tmp/unprotected
           echo "tables without RLS: $(cat /tmp/unprotected)"
           test "$(cat /tmp/unprotected)" = "0"
+      - name: Assert AuthorForge update eligibility matrix
+        run: $PSQL -d fc -f supabase/tests/update_eligibility_matrix.sql
       - name: Assert append-only ledgers reject UPDATE
         run: |
           set +e

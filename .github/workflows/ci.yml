@@ -71,6 +71,39 @@ jobs:
           if [ $? -eq 0 ]; then echo "ERROR: usage_events UPDATE should have failed"; exit 1; fi
           echo "append-only enforced"
 
+  release-pipeline-smoke:
+    name: release pipeline smoke
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PGPASSWORD: postgres
+      PSQL: psql -h localhost -U postgres -v ON_ERROR_STOP=1
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/fc
+      RELEASE_ARTIFACT_BASE_URL: https://downloads.example.test/authorforge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Create database + Supabase auth shims
+        run: |
+          $PSQL -c "create database fc;"
+          $PSQL -d fc -c "create schema if not exists auth;"
+          $PSQL -d fc -c "create or replace function auth.uid() returns uuid language sql stable as \$\$ select null::uuid \$\$;"
+      - name: Apply migrations + seed
+        run: |
+          for f in supabase/migrations/*.sql; do echo "applying $f"; $PSQL -d fc -f "$f"; done
+          $PSQL -d fc -f supabase/seed.sql
+      - name: Run release package publication smoke
+        run: bash scripts/release_pipeline_smoke.sh
+
   contracts:
     name: OpenAPI + schema validation
     runs-on: ubuntu-latest

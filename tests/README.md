@@ -10,12 +10,14 @@ ForgeCustomer's test strategy spans three layers.
 | Security integration | `api/tests/security.rs` | unauthenticated routes fail closed (including all licensing, entitlement, usage, deletion, and subscription routes and parameterized installation/admin routes); entitlement keys and public release distribution stay public; **customer token cannot access admin route**; valid operator token clears admin auth in front of data access; **admin mutations require the `admin` role** (support role 403s on every mutation incl. release/artifact registration and deletion advance/reject/execute, reads pass); admin reason/shape validation rejects before DB writes; usage adjustments and release registration require idempotency keys; account provisioning auth/input boundary; Stripe webhook fail-closed boundary; body-size, timeout, rate-limit, and hostile-correlation-id guards; error contract shape |
 | Migration + RLS | `.github/workflows/ci.yml` (`migrations` job) | clean apply, **deterministic reruns**, idempotent seed, **RLS enabled on every table**, AuthorForge update eligibility SQL matrix, append-only ledger rejects UPDATE |
 | Release package smoke | `.github/workflows/ci.yml` (`release-pipeline-smoke` job) | creates immutable bootstrap/updater fixture packages, verifies checksum/size evidence, publishes release/artifact metadata into PostgreSQL, starts the real API, and proves the public bootstrap lookup returns the expected artifact URL |
+| Update campaign HTTP smoke | `.github/workflows/ci.yml` (`update-campaign-http-smoke` job) | seeds a customer/fleet/installation/release/campaign fixture, mints a customer JWT, starts the real API, and proves Tauri 200/204 response shape, same-version/same-build skips, minimum supported/updater version gates, and deterministic rollout bucket behavior |
 
 Run locally:
 
 ```bash
 cargo test --all          # unit + security integration
 bash scripts/release_pipeline_smoke.sh  # after migrations + seed are applied to DB_NAME/PSQL
+bash scripts/update_campaign_http_smoke.sh  # after migrations + seed are applied to DB_NAME/PSQL
 # migration/RLS checks: see the `migrations` job in CI, or apply supabase/migrations/*.sql
 ```
 

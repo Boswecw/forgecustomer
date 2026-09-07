@@ -897,6 +897,50 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { description: Customer or meter not found }
         "422": { description: Validation failed }
+  /v1/admin/products/authorforge/commercial-policy:
+    get:
+      tags: [admin]
+      summary: Read the active global AuthorForge commercial-policy version
+      description: >
+        Returns the effective immutable policy version. This is global commercial truth and
+        is distinct from customer entitlement overrides.
+      security: [{ adminAuth: [] }]
+      responses:
+        "200":
+          description: Active global commercial-policy version
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommercialPolicyVersion" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: No active policy exists }
+  /v1/admin/products/authorforge/commercial-policy/versions:
+    post:
+      tags: [admin]
+      summary: Publish an immutable global AuthorForge commercial-policy version
+      description: >
+        Requires the current active plan_version as optimistic-concurrency input and an
+        Idempotency-Key. Publishing creates a new effective-dated policy version, a
+        commercial-audit record, and a sanitized outbox receipt; historic versions are never edited.
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminCommercialPolicyRequest" }
+      responses:
+        "200":
+          description: Published or idempotently replayed policy version
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommercialPolicyVersion" }
+        "400": { description: Missing Idempotency-Key }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: AuthorForge product or active policy not found }
+        "409": { description: base_plan_version does not match the active version }
+        "422": { description: Validation failed }
   /v1/admin/fleets:
     get:
       tags: [admin]
@@ -1616,6 +1660,48 @@ components:
         release_channel_key: { type: ["string", "null"] }
         beta_enrolled: { type: ["boolean", "null"] }
         reason: { type: string, minLength: 3, maxLength: 500 }
+    CommercialPolicyLimits:
+      type: object
+      additionalProperties: false
+      required:
+        [cloud_tokens_per_month, deep_analysis_runs_per_month,
+         premium_model_requests_per_month, device_limit]
+      properties:
+        cloud_tokens_per_month: { type: integer, minimum: 0 }
+        deep_analysis_runs_per_month: { type: integer, minimum: 0 }
+        premium_model_requests_per_month: { type: integer, minimum: 0 }
+        device_limit: { type: integer, minimum: 0 }
+    CommercialPolicyDocument:
+      type: object
+      additionalProperties: false
+      required: [included, pro]
+      properties:
+        included: { $ref: "#/components/schemas/CommercialPolicyLimits" }
+        pro: { $ref: "#/components/schemas/CommercialPolicyLimits" }
+    AdminCommercialPolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [base_plan_version, effective_at, policy, reason]
+      properties:
+        base_plan_version:
+          type: string
+          description: The plan_version returned by the active-policy read.
+        effective_at: { type: string, format: date-time }
+        policy: { $ref: "#/components/schemas/CommercialPolicyDocument" }
+        reason: { type: string, minLength: 3, maxLength: 500 }
+    CommercialPolicyVersion:
+      type: object
+      required:
+        [product_key, plan_version, effective_at, policy, reason, published_by, published_at]
+      properties:
+        product_key: { type: string, enum: [authorforge] }
+        plan_version: { type: string }
+        effective_at: { type: string, format: date-time }
+        policy: { $ref: "#/components/schemas/CommercialPolicyDocument" }
+        reason: { type: string }
+        published_by: { type: string }
+        correlation_id: { type: ["string", "null"] }
+        published_at: { type: string, format: date-time }
     AdminReleaseCreateRequest:
       type: object
       additionalProperties: false

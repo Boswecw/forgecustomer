@@ -5,6 +5,7 @@
 pub mod admin;
 pub mod catalog;
 pub mod commerce;
+pub mod commercial_policy;
 pub mod customers;
 pub mod entitlements;
 pub mod licensing;

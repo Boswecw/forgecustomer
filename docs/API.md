@@ -60,6 +60,18 @@ Representative codes: `UNAUTHENTICATED`, `INVALID_TOKEN`, `TOKEN_EXPIRED`,
 See `docs/LICENSING.md`, `docs/ENTITLEMENTS.md`, `docs/USAGE.md`, `docs/STRIPE.md` for the
 per-domain endpoint semantics, and Phase 10 of the plan for the admin surface.
 
+## Global AuthorForge commercial policy
+
+Forge Command controls global Included/Pro limits through ForgeCustomer, never through
+per-customer entitlement overrides. `GET /v1/admin/products/authorforge/commercial-policy`
+returns the active immutable version. `POST .../versions` requires an admin operator token,
+an `Idempotency-Key`, the active `base_plan_version`, an RFC3339 `effective_at`, all four
+non-negative limits for both plans, and an audited reason. It creates a new immutable policy
+version plus commercial-audit and sanitized outbox receipts; a stale base version returns `409`.
+Entitlement assembly and subscription-linked device activation resolve the effective policy at
+request time. Customer-specific overrides and directly issued licenses remain explicit exceptions
+and are not silently rewritten by a global policy version.
+
 ## Health, ready, version
 
 - `GET /v1/health` → `{ "status": "ok" }` (process is up).

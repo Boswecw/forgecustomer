@@ -105,6 +105,36 @@ join (values
 ) as q(meter_key, limit_value) on true
 on conflict (plan_version_id, meter_key) do nothing;
 
+-- Global commercial policy --------------------------------------------------
+-- The authoritative, effective-dated policy document consumed by the Forge Command cockpit.
+-- These values mirror the baseline catalog above and are explicit only as the bootstrap policy;
+-- later versions are created through the audited admin endpoint.
+insert into public.commercial_policy_versions
+  (product_id, version, effective_at, policy, reason, created_by, idempotency_key)
+select p.id,
+       1,
+       '2026-01-01T00:00:00Z'::timestamptz,
+       jsonb_build_object(
+         'included', jsonb_build_object(
+           'cloud_tokens_per_month', 0,
+           'deep_analysis_runs_per_month', 0,
+           'premium_model_requests_per_month', 0,
+           'device_limit', 1
+         ),
+         'pro', jsonb_build_object(
+           'cloud_tokens_per_month', 1000000,
+           'deep_analysis_runs_per_month', 500,
+           'premium_model_requests_per_month', 2000,
+           'device_limit', 3
+         )
+       ),
+       'Bootstrap policy mirrored from the seeded AuthorForge catalog.',
+       'system:seed',
+       'seed:authorforge-commercial-policy-v1'
+from public.products p
+where p.key = 'authorforge'
+on conflict (product_id, version) do nothing;
+
 -- Policy versions ----------------------------------------------------------
 insert into public.policy_versions (policy_key, version, url) values
   ('terms',   '2026-01-01', 'https://boswell.example/terms/2026-01-01'),

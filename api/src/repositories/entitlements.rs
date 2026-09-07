@@ -19,6 +19,7 @@ use crate::domain::entitlement::{EntitlementInputs, FeatureValue};
 use crate::domain::lease::{OfflineLease, LEASE_SCHEMA_VERSION};
 use crate::domain::snapshot::EntitlementSnapshot;
 use crate::domain::subscription::{normalize_stripe_status, SubscriptionStatus};
+use crate::repositories::commercial_policy::{self, PolicyDocument, PolicyLimits};
 use crate::repositories::licensing::{write_customer_audit, CustomerAudit};
 use crate::services::signing::Signer25519;
 
@@ -178,10 +179,10 @@ async fn current_subscription(
     pool: &PgPool,
     customer_id: Uuid,
     product_id: Uuid,
-) -> Result<Option<(Uuid, String)>, sqlx::Error> {
-    sqlx::query_as::<_, (Uuid, String)>(
+) -> Result<Option<(Uuid, String, String)>, sqlx::Error> {
+    sqlx::query_as::<_, (Uuid, String, String)>(
         r#"
-        select s.plan_version_id, s.status
+        select s.plan_version_id, s.status, pl.key
         from public.subscriptions s
         join public.plan_versions pv on pv.id = s.plan_version_id
         join public.plans pl on pl.id = pv.plan_id
@@ -198,6 +199,52 @@ async fn current_subscription(
     .bind(product_id)
     .fetch_optional(pool)
     .await
+}
+
+/// Applies the effective AuthorForge commercial policy after the catalog layer but before
+/// license/promotional/admin exceptions. This makes the cockpit-controlled policy global while
+/// preserving the established precedence of explicit per-customer remediation.
+fn apply_commercial_policy(
+    limits: &PolicyLimits,
+    features: &mut BTreeMap<String, FeatureValue>,
+    quotas: &mut BTreeMap<String, f64>,
+) {
+    features.insert(
+        "authorforge.cloud.enabled".to_string(),
+        FeatureValue::Bool(limits.cloud_tokens_per_month > 0),
+    );
+    features.insert(
+        "authorforge.deep_analysis.enabled".to_string(),
+        FeatureValue::Bool(limits.deep_analysis_runs_per_month > 0),
+    );
+    features.insert(
+        "authorforge.premium.enabled".to_string(),
+        FeatureValue::Bool(limits.premium_model_requests_per_month > 0),
+    );
+    features.insert(
+        "authorforge.devices.max".to_string(),
+        FeatureValue::Number(limits.device_limit as f64),
+    );
+    quotas.insert(
+        "cloud_tokens.monthly".to_string(),
+        limits.cloud_tokens_per_month as f64,
+    );
+    quotas.insert(
+        "deep_analysis_runs.monthly".to_string(),
+        limits.deep_analysis_runs_per_month as f64,
+    );
+    quotas.insert(
+        "premium_model_requests.monthly".to_string(),
+        limits.premium_model_requests_per_month as f64,
+    );
+}
+
+fn limits_for_plan<'a>(policy: &'a PolicyDocument, plan_key: &str) -> Option<&'a PolicyLimits> {
+    match plan_key {
+        "authorforge_included" => Some(&policy.included),
+        "authorforge_pro" => Some(&policy.pro),
+        _ => None,
+    }
 }
 
 /// Load every evaluation layer for (customer, product). Returns `None` for an unknown or
@@ -221,6 +268,11 @@ pub async fn load_entitlement_inputs(
     let mut inputs = EntitlementInputs::default();
     let mut quotas: BTreeMap<String, f64> = BTreeMap::new();
     let mut cadences: BTreeMap<String, String> = BTreeMap::new();
+    let commercial_policy = if product_key == "authorforge" {
+        commercial_policy::active_document(pool).await?
+    } else {
+        None
+    };
 
     // Baseline: the included plan ("product defaults" layer).
     if let Some(plan_version_id) = included_plan_version(pool, product_id, product_key).await? {
@@ -229,18 +281,27 @@ pub async fn load_entitlement_inputs(
             cadences.insert(quota.meter_key.clone(), quota.reset_cadence);
             quotas.insert(quota.meter_key, quota.limit_value);
         }
+        if let Some(policy) = commercial_policy.as_ref() {
+            apply_commercial_policy(&policy.included, &mut inputs.product_defaults, &mut quotas);
+        }
     }
 
     // Subscription plan layer + cloud gate.
     let subscription = current_subscription(pool, customer_id, product_id).await?;
     let subscription_status = subscription
         .as_ref()
-        .map(|(_, status)| normalize_stripe_status(status));
-    if let Some((plan_version_id, _)) = subscription {
+        .map(|(_, status, _)| normalize_stripe_status(status));
+    if let Some((plan_version_id, _, plan_key)) = subscription {
         inputs.plan_version = plan_feature_layer(pool, plan_version_id).await?;
         for quota in plan_quota_layer(pool, plan_version_id).await? {
             cadences.insert(quota.meter_key.clone(), quota.reset_cadence);
             quotas.insert(quota.meter_key, quota.limit_value);
+        }
+        if let Some(limits) = commercial_policy
+            .as_ref()
+            .and_then(|policy| limits_for_plan(policy, &plan_key))
+        {
+            apply_commercial_policy(limits, &mut inputs.plan_version, &mut quotas);
         }
     }
     inputs.subscription_grants_cloud = subscription_status
@@ -612,4 +673,31 @@ pub async fn issue_offline_lease(
 
     tx.commit().await?;
     Ok(IssuedLease { lease })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commercial_policy_layer_replaces_catalog_limits_before_customer_exceptions() {
+        let limits = PolicyLimits {
+            cloud_tokens_per_month: 42,
+            deep_analysis_runs_per_month: 7,
+            premium_model_requests_per_month: 3,
+            device_limit: 5,
+        };
+        let mut features = BTreeMap::new();
+        let mut quotas = BTreeMap::new();
+        apply_commercial_policy(&limits, &mut features, &mut quotas);
+        assert_eq!(
+            features.get("authorforge.devices.max"),
+            Some(&FeatureValue::Number(5.0))
+        );
+        assert_eq!(quotas.get("cloud_tokens.monthly"), Some(&42.0));
+        assert_eq!(
+            features.get("authorforge.deep_analysis.enabled"),
+            Some(&FeatureValue::Bool(true))
+        );
+    }
 }

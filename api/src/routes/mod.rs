@@ -55,7 +55,7 @@ use crate::repositories::commerce::{StripeWebhookApplyError, StripeWebhookRecord
 use crate::repositories::licensing::{self, ActivationError, RegistrationError};
 use crate::repositories::updates as update_repo;
 use crate::repositories::usage as usage_repo;
-use crate::repositories::{admin, commerce, customers, privacy};
+use crate::repositories::{admin, commerce, commercial_policy, customers, privacy};
 use crate::state::AppState;
 
 /// Assemble the full application router.
@@ -144,6 +144,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/admin/licenses/:id/revoke", post(admin_revoke_license))
         .route("/v1/admin/entitlements/override", post(admin_override))
         .route("/v1/admin/usage/adjust", post(admin_usage_adjust))
+        .route(
+            "/v1/admin/products/authorforge/commercial-policy",
+            get(admin_authorforge_commercial_policy),
+        )
+        .route(
+            "/v1/admin/products/authorforge/commercial-policy/versions",
+            post(admin_authorforge_commercial_policy_publish),
+        )
         .route("/v1/admin/audit", get(admin_audit))
         .route("/v1/admin/fleets", get(admin_fleets))
         .route("/v1/admin/fleets/:id", get(admin_fleet))
@@ -1671,6 +1679,24 @@ fn admin_error(error: admin::AdminError) -> AppError {
     }
 }
 
+fn commercial_policy_error(error: commercial_policy::PolicyError) -> AppError {
+    match error {
+        commercial_policy::PolicyError::ProductNotFound => {
+            AppError::not_found("AuthorForge product not found.")
+        }
+        commercial_policy::PolicyError::NoActivePolicy => {
+            AppError::not_found("No active AuthorForge commercial policy exists.")
+        }
+        commercial_policy::PolicyError::VersionConflict => AppError::new(
+            ErrorCode::Conflict,
+            "The global commercial policy changed; refresh and review the active version.",
+        ),
+        commercial_policy::PolicyError::EffectiveAtInPast
+        | commercial_policy::PolicyError::Invalid(_) => AppError::validation(error.to_string()),
+        commercial_policy::PolicyError::Db(error) => error.into(),
+    }
+}
+
 fn subscription_fetch_error(error: SubscriptionFetchError) -> AppError {
     match error {
         SubscriptionFetchError::NotConfigured => {
@@ -1787,6 +1813,69 @@ struct AdminFleetPolicyRequest {
     release_channel_key: Option<String>,
     beta_enrolled: Option<bool>,
     reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdminCommercialPolicyRequest {
+    base_plan_version: String,
+    effective_at: String,
+    policy: commercial_policy::PolicyDocument,
+    reason: String,
+}
+
+async fn admin_authorforge_commercial_policy(
+    _admin: AdminContext,
+    State(state): State<AppState>,
+) -> AppResult<Json<Value>> {
+    let policy = commercial_policy::read_active(&state.pool)
+        .await?
+        .ok_or_else(|| AppError::not_found("No active AuthorForge commercial policy exists."))?;
+    Ok(Json(
+        serde_json::to_value(policy).expect("commercial policy is serializable"),
+    ))
+}
+
+async fn admin_authorforge_commercial_policy_publish(
+    operator: AdminContext,
+    State(state): State<AppState>,
+    correlation: Option<Extension<mw::CorrelationId>>,
+    headers: HeaderMap,
+    Json(request): Json<AdminCommercialPolicyRequest>,
+) -> AppResult<Json<Value>> {
+    operator.require_role("admin")?;
+    let idempotency_key = idempotency_key(&headers).ok_or_else(|| {
+        AppError::bad_request("Commercial policy publishing requires an Idempotency-Key header.")
+    })?;
+    let base_plan_version = request.base_plan_version.trim();
+    if base_plan_version.is_empty() {
+        return Err(AppError::validation("must not be empty")
+            .with_details(json!({ "field": "base_plan_version" })));
+    }
+    let effective_at = chrono::DateTime::parse_from_rfc3339(request.effective_at.trim())
+        .map(|value| value.with_timezone(&chrono::Utc))
+        .map_err(|_| {
+            AppError::validation("must be an RFC 3339 timestamp")
+                .with_details(json!({ "field": "effective_at" }))
+        })?;
+    let reason = clean_reason(&request.reason).map_err(admin_validation_error)?;
+    let policy = commercial_policy::publish(
+        &state.pool,
+        commercial_policy::PublishInput {
+            operator_id: &operator.operator_id,
+            base_plan_version,
+            effective_at,
+            policy: request.policy,
+            reason: &reason,
+            idempotency_key,
+            correlation_id: correlation_id(&correlation),
+        },
+    )
+    .await
+    .map_err(commercial_policy_error)?;
+    Ok(Json(
+        serde_json::to_value(policy).expect("commercial policy is serializable"),
+    ))
 }
 
 async fn admin_fleet_policy(

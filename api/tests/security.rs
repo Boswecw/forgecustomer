@@ -194,38 +194,61 @@ async fn admin_mutations_require_admin_role() {
         "/v1/admin/licenses".to_string(),
         "/v1/admin/entitlements/override".to_string(),
         "/v1/admin/usage/adjust".to_string(),
+        "/v1/admin/products/authorforge/commercial-policy/versions".to_string(),
     ] {
         // A superset body that deserializes for every mutation route (serde ignores
         // unknown fields), so the role gate — not body validation — is what rejects.
-        let body = json!({
-            "reason": "support cleanup",
-            "required": true,
-            "customer_id": "9f1c2d3e-4b5a-6789-0abc-def012345678",
-            "meter_key": "cloud_tokens",
-            "amount": -100,
-            "feature_key": "authorforge.cloud.enabled",
-            "value": true,
-            "display_name": "Default fleet",
-            "update_ring": "standard",
-            "release_channel": "stable",
-            "product_key": "authorforge",
-            "version": "1.0.1",
-            "build_id": "20260612.abcd",
-            "platform": "linux",
-            "architecture": "x86_64",
-            "package_format": "appimage",
-            "artifact_role": "bootstrap",
-            "storage_key": "authorforge/1.0.1/linux-x86_64.appimage",
-            "size_bytes": 123,
-            "sha256": "a".repeat(64),
-            "tauri_signature": "tauri-signature",
-            "signing_key_id": "tauri-key-1",
-            "os_signature_status": "verified",
-            "target_release_id": id,
-            "campaign_slug": "authorforge-test-campaign",
-            "rollout_percentage": 0,
-            "fleet_id": id
-        });
+        let body = if uri == "/v1/admin/products/authorforge/commercial-policy/versions" {
+            json!({
+                "base_plan_version": "1",
+                "effective_at": "2026-10-01T00:00:00Z",
+                "policy": {
+                    "included": {
+                        "cloud_tokens_per_month": 0,
+                        "deep_analysis_runs_per_month": 0,
+                        "premium_model_requests_per_month": 0,
+                        "device_limit": 1
+                    },
+                    "pro": {
+                        "cloud_tokens_per_month": 1,
+                        "deep_analysis_runs_per_month": 1,
+                        "premium_model_requests_per_month": 1,
+                        "device_limit": 1
+                    }
+                },
+                "reason": "support cleanup"
+            })
+        } else {
+            json!({
+                "reason": "support cleanup",
+                "required": true,
+                "customer_id": "9f1c2d3e-4b5a-6789-0abc-def012345678",
+                "meter_key": "cloud_tokens",
+                "amount": -100,
+                "feature_key": "authorforge.cloud.enabled",
+                "value": true,
+                "display_name": "Default fleet",
+                "update_ring": "standard",
+                "release_channel": "stable",
+                "product_key": "authorforge",
+                "version": "1.0.1",
+                "build_id": "20260612.abcd",
+                "platform": "linux",
+                "architecture": "x86_64",
+                "package_format": "appimage",
+                "artifact_role": "bootstrap",
+                "storage_key": "authorforge/1.0.1/linux-x86_64.appimage",
+                "size_bytes": 123,
+                "sha256": "a".repeat(64),
+                "tauri_signature": "tauri-signature",
+                "signing_key_id": "tauri-key-1",
+                "os_signature_status": "verified",
+                "target_release_id": id,
+                "campaign_slug": "authorforge-test-campaign",
+                "rollout_percentage": 0,
+                "fleet_id": id
+            })
+        };
         let req = Request::builder()
             .method("POST")
             .uri(&uri)
@@ -640,6 +663,7 @@ async fn parameterized_admin_routes_match_and_require_auth() {
     }
 
     for uri in [
+        "/v1/admin/products/authorforge/commercial-policy".to_string(),
         format!("/v1/admin/fleets/{id}"),
         format!("/v1/admin/releases/{id}"),
         format!("/v1/admin/update-campaigns/{id}"),

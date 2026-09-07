@@ -438,7 +438,11 @@ pub async fn activate_installation(
         return Err(ActivationError::RevocationBlocked);
     }
 
-    let device_limit = u32::try_from(license.device_limit.max(0)).unwrap_or(0);
+    // Subscription-linked licenses resolve the effective global policy at activation time.
+    // Manually issued licenses have no subscription plan and keep their explicit limit.
+    let policy_limit = commercial_policy_device_limit_for_license(&mut tx, license.id).await?;
+    let device_limit =
+        u32::try_from(policy_limit.unwrap_or(license.device_limit).max(0)).unwrap_or(0);
     let active_count = sqlx::query_scalar::<_, i64>(
         "select count(*) from public.license_activations where license_id = $1 and status = 'active'",
     )
@@ -724,6 +728,63 @@ impl LicenseSyncOutcome {
     }
 }
 
+/// Resolve the effective device ceiling for one subscription plan. Policy is read at execution
+/// time, so a scheduled version takes effect without rewriting historic license rows.
+async fn commercial_policy_device_limit(
+    tx: &mut Transaction<'_, Postgres>,
+    product_key: &str,
+    plan_key: &str,
+) -> Result<Option<i32>, sqlx::Error> {
+    let tier = match (product_key, plan_key) {
+        ("authorforge", "authorforge_included") => "included",
+        ("authorforge", "authorforge_pro") => "pro",
+        _ => return Ok(None),
+    };
+    let limit = sqlx::query_scalar::<_, i64>(
+        r#"
+        select (cp.policy -> $2 ->> 'device_limit')::bigint
+        from public.commercial_policy_versions cp
+        join public.products p on p.id = cp.product_id
+        where p.key = $1 and cp.effective_at <= now()
+        order by cp.effective_at desc, cp.version desc
+        limit 1
+        "#,
+    )
+    .bind(product_key)
+    .bind(tier)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(limit.map(|value| i32::try_from(value.clamp(0, i64::from(i32::MAX))).unwrap_or(0)))
+}
+
+/// Resolve the policy tier only for a license that derives from a subscription. Direct admin
+/// licenses intentionally remain explicit customer-specific grants rather than global plan terms.
+async fn commercial_policy_device_limit_for_license(
+    tx: &mut Transaction<'_, Postgres>,
+    license_id: Uuid,
+) -> Result<Option<i32>, sqlx::Error> {
+    let plan = sqlx::query_as::<_, (String, String)>(
+        r#"
+        select p.key, pl.key
+        from public.licenses l
+        join public.products p on p.id = l.product_id
+        join public.subscriptions s on s.id = l.subscription_id
+        join public.plan_versions pv on pv.id = s.plan_version_id
+        join public.plans pl on pl.id = pv.plan_id
+        where l.id = $1
+        "#,
+    )
+    .bind(license_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    match plan {
+        Some((product_key, plan_key)) => {
+            commercial_policy_device_limit(tx, &product_key, &plan_key).await
+        }
+        None => Ok(None),
+    }
+}
+
 /// Keep the license linked to a subscription consistent with verified subscription truth.
 /// Issues on first grant, suspends/expires/reactivates per the pure transition rules, and
 /// refreshes the device limit from the (possibly new) plan version while the subscription
@@ -736,9 +797,10 @@ pub async fn sync_license_for_subscription(
     plan_version_id: Uuid,
     subscription_status: SubscriptionStatus,
 ) -> Result<Option<LicenseSyncOutcome>, sqlx::Error> {
-    let Some((product_id, devices_max)) = sqlx::query_as::<_, (Uuid, Option<i64>)>(
-        r#"
-        select pl.product_id,
+    let Some((product_id, product_key, plan_key, devices_max)) =
+        sqlx::query_as::<_, (Uuid, String, String, Option<i64>)>(
+            r#"
+        select pl.product_id, p.key, pl.key,
                (select floor(pf.number_value)::int8
                 from public.plan_features pf
                 join public.features f on f.id = pf.feature_id
@@ -749,16 +811,19 @@ pub async fn sync_license_for_subscription(
         join public.products p on p.id = pl.product_id
         where pv.id = $1
         "#,
-    )
-    .bind(plan_version_id)
-    .fetch_optional(&mut **tx)
-    .await?
+        )
+        .bind(plan_version_id)
+        .fetch_optional(&mut **tx)
+        .await?
     else {
         return Ok(None);
     };
     // Plans without an explicit devices.max feature default to a single device.
-    let device_limit =
+    let catalog_limit =
         i32::try_from(devices_max.unwrap_or(1).clamp(0, i64::from(i32::MAX))).unwrap_or(1);
+    let device_limit = commercial_policy_device_limit(tx, &product_key, &plan_key)
+        .await?
+        .unwrap_or(catalog_limit);
 
     let existing = sqlx::query_as::<_, (Uuid, String, i32)>(
         r#"

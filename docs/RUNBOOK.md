@@ -59,7 +59,7 @@
 - Dynamic lookup: `GET /v1/updates/authorforge/{target}/{arch}/{current_version}` with
   `X-Forge-Installation-ID`. No eligible update returns `204`.
 - Outcome receipts: `POST /v1/installations/{id}/update-events` with a UUID
-  `Idempotency-Key`.
+  `Idempotency-Key` and the opaque, short-lived `update_ticket` returned by update lookup.
 
 ## Outbox / DataForge
 

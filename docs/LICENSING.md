@@ -92,10 +92,12 @@ writes a `commercial_audit_event` (`license_issued`, `license_reactivated`,
   HMAC rollout.
 - The rollout secret is server-side only (`UPDATE_ROLLOUT_SECRET`). Missing rollout or
   artifact URL configuration is visible as `503`, not a silent hardcoded fallback.
-- Eligible responses use the Tauri updater shape only:
-  `{ version, url, signature, notes, pub_date }`.
+- Eligible responses add an opaque, short-lived `update_ticket` to the Tauri updater shape:
+  `{ version, url, signature, notes, pub_date, update_ticket }`. It is server-stateful and
+  reveals neither a campaign ID nor release ID.
 - `POST /v1/installations/{id}/update-events` stores only minimal outcome states with a
-  UUID `Idempotency-Key`; unknown fields and raw diagnostic text are rejected.
+  UUID `Idempotency-Key` and `update_ticket`; campaign/release IDs, unknown fields, and raw
+  diagnostic text are rejected.
 
 ## Activation rules (fail closed)
 

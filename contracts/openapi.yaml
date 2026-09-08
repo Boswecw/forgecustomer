@@ -377,8 +377,8 @@ paths:
         "200": { description: "Receipt { event_id, event_type, received }" }
         "400": { description: Missing or non-UUID Idempotency-Key }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "404": { description: "Installation, campaign, or release not found" }
-        "409": { description: Campaign does not target the supplied release }
+        "404": { description: "Installation not found" }
+        "409": { description: "Update ticket is invalid, expired, or for another installation" }
         "422": { description: Event validation failed }
   /v1/updates/authorforge/{target}/{arch}/{current_version}:
     get:
@@ -388,7 +388,8 @@ paths:
         Resolves update eligibility from the caller's owned installation and server-side
         fleet assignment. ForgeCustomer never trusts a fleet id from the client. A miss
         returns 204 No Content; an eligible update returns exactly the Tauri updater
-        response shape.
+        response shape plus an opaque, short-lived receipt ticket. The ticket does not
+        expose campaign or release identifiers.
       parameters:
         - name: target
           in: path
@@ -1604,7 +1605,7 @@ components:
     TauriUpdateResponse:
       type: object
       additionalProperties: false
-      required: [version, url, signature, pub_date]
+      required: [version, url, signature, pub_date, update_ticket]
       properties:
         version: { type: string, examples: ["1.0.1"] }
         url:
@@ -1616,13 +1617,18 @@ components:
           description: Tauri updater signature contents for the selected artifact.
         notes: { type: ["string", "null"] }
         pub_date: { type: string, format: date-time }
+        update_ticket:
+          type: string
+          format: uuid
+          description: Opaque short-lived receipt ticket; it contains no release or campaign IDs.
     InstallationUpdateEventRequest:
       type: object
       additionalProperties: false
-      required: [event_type]
+      required: [update_ticket, event_type]
       properties:
-        campaign_id: { type: ["string", "null"], format: uuid }
-        release_id: { type: ["string", "null"], format: uuid }
+        update_ticket:
+          type: string
+          format: uuid
         event_type:
           type: string
           enum:
@@ -1638,10 +1644,6 @@ components:
             - rejected
             - failed
             - recovery_required
-        from_version: { type: ["string", "null"], maxLength: 64 }
-        from_build_id: { type: ["string", "null"], maxLength: 80 }
-        to_version: { type: ["string", "null"], maxLength: 64 }
-        to_build_id: { type: ["string", "null"], maxLength: 80 }
         failure_code: { type: ["string", "null"], maxLength: 80 }
         failure_class: { type: ["string", "null"], maxLength: 80 }
         occurred_at: { type: ["string", "null"], format: date-time }

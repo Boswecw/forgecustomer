@@ -8,12 +8,8 @@ use uuid::Uuid;
 pub enum UpdateEventError {
     #[error("installation not found")]
     InstallationNotFound,
-    #[error("campaign not found")]
-    CampaignNotFound,
-    #[error("release not found")]
-    ReleaseNotFound,
-    #[error("campaign does not target the supplied release")]
-    InvalidCampaignRelease,
+    #[error("update ticket is invalid, expired, or does not belong to the installation")]
+    InvalidUpdateTicket,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -109,6 +105,34 @@ pub async fn candidate_rows(
         .bind(input.package_format)
         .fetch_all(pool)
         .await
+}
+
+/// Returns the stable opaque ticket for this eligible installation/campaign/release
+/// combination, extending its short receipt window from the current lookup. The UUID
+/// deliberately has no client-meaningful campaign or release information.
+pub async fn issue_update_ticket(
+    pool: &PgPool,
+    installation_id: Uuid,
+    campaign_id: Uuid,
+    release_id: Uuid,
+) -> Result<Uuid, sqlx::Error> {
+    sqlx::query_scalar::<_, Uuid>(
+        r#"
+        insert into public.update_outcome_tickets
+            (installation_id, campaign_id, release_id, expires_at, issued_at)
+        values
+            ($1, $2, $3, now() + interval '1 hour', now())
+        on conflict (installation_id, campaign_id, release_id) do update
+        set expires_at = excluded.expires_at,
+            issued_at = excluded.issued_at
+        returning token
+        "#,
+    )
+    .bind(installation_id)
+    .bind(campaign_id)
+    .bind(release_id)
+    .fetch_one(pool)
+    .await
 }
 
 #[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
@@ -210,13 +234,8 @@ pub struct UpdateEventInput<'a> {
     pub event_id: Uuid,
     pub customer_id: Uuid,
     pub installation_id: Uuid,
-    pub campaign_id: Option<Uuid>,
-    pub release_id: Option<Uuid>,
+    pub update_ticket: Uuid,
     pub event_type: &'a str,
-    pub from_version: Option<&'a str>,
-    pub from_build_id: Option<&'a str>,
-    pub to_version: Option<&'a str>,
-    pub to_build_id: Option<&'a str>,
     pub failure_code: Option<&'a str>,
     pub failure_class: Option<&'a str>,
     pub occurred_at: DateTime<Utc>,
@@ -251,53 +270,38 @@ pub async fn record_update_event(
         return Err(UpdateEventError::InstallationNotFound);
     }
 
-    if let Some(release_id) = input.release_id {
-        let release_exists = sqlx::query_scalar::<_, bool>(
-            "select exists(select 1 from public.product_releases where id = $1)",
-        )
-        .bind(release_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        if !release_exists {
-            return Err(UpdateEventError::ReleaseNotFound);
-        }
-    }
-
-    if let Some(campaign_id) = input.campaign_id {
-        let campaign_target = sqlx::query_scalar::<_, Uuid>(
-            "select target_release_id from public.update_campaigns where id = $1",
-        )
-        .bind(campaign_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(UpdateEventError::CampaignNotFound)?;
-        if let Some(release_id) = input.release_id {
-            if campaign_target != release_id {
-                return Err(UpdateEventError::InvalidCampaignRelease);
-            }
-        }
-    }
+    let ticket_binding = sqlx::query_as::<_, (Uuid, Uuid)>(
+        r#"
+        select campaign_id, release_id
+        from public.update_outcome_tickets
+        where token = $1
+          and installation_id = $2
+          and expires_at > now()
+        "#,
+    )
+    .bind(input.update_ticket)
+    .bind(input.installation_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(UpdateEventError::InvalidUpdateTicket)?;
 
     let inserted = sqlx::query_scalar::<_, Uuid>(
         r#"
         insert into public.installation_update_events
-            (id, installation_id, campaign_id, release_id, event_type, from_version,
-             from_build_id, to_version, to_build_id, failure_code, failure_class, occurred_at)
+            (id, installation_id, campaign_id, release_id, update_ticket, event_type,
+             failure_code, failure_class, occurred_at)
         values
-            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         on conflict (id) do nothing
         returning id
         "#,
     )
     .bind(input.event_id)
     .bind(input.installation_id)
-    .bind(input.campaign_id)
-    .bind(input.release_id)
+    .bind(ticket_binding.0)
+    .bind(ticket_binding.1)
+    .bind(input.update_ticket)
     .bind(input.event_type)
-    .bind(input.from_version)
-    .bind(input.from_build_id)
-    .bind(input.to_version)
-    .bind(input.to_build_id)
     .bind(input.failure_code)
     .bind(input.failure_class)
     .bind(input.occurred_at)

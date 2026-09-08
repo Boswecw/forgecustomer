@@ -367,6 +367,7 @@ struct TauriUpdateResponse {
     signature: String,
     notes: Option<String>,
     pub_date: String,
+    update_ticket: Uuid,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -385,13 +386,8 @@ struct PublicDownloadQuery {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InstallationUpdateEventRequest {
-    campaign_id: Option<Uuid>,
-    release_id: Option<Uuid>,
+    update_ticket: Uuid,
     event_type: String,
-    from_version: Option<String>,
-    from_build_id: Option<String>,
-    to_version: Option<String>,
-    to_build_id: Option<String>,
     failure_code: Option<String>,
     failure_class: Option<String>,
     occurred_at: Option<String>,
@@ -924,13 +920,9 @@ fn update_event_error(error: update_repo::UpdateEventError) -> AppError {
         update_repo::UpdateEventError::InstallationNotFound => {
             AppError::not_found("Installation not found.")
         }
-        update_repo::UpdateEventError::CampaignNotFound => {
-            AppError::not_found("Update campaign not found.")
-        }
-        update_repo::UpdateEventError::ReleaseNotFound => AppError::not_found("Release not found."),
-        update_repo::UpdateEventError::InvalidCampaignRelease => AppError::new(
+        update_repo::UpdateEventError::InvalidUpdateTicket => AppError::new(
             ErrorCode::Conflict,
-            "Update campaign does not target the supplied release.",
+            "Update ticket is invalid, expired, or does not belong to this installation.",
         ),
         update_repo::UpdateEventError::Db(error) => error.into(),
     }
@@ -1084,12 +1076,20 @@ async fn authorforge_update_check(
             continue;
         }
 
+        let update_ticket = update_repo::issue_update_ticket(
+            &state.pool,
+            installation_id,
+            candidate.campaign_id,
+            candidate.release_id,
+        )
+        .await?;
         let response = TauriUpdateResponse {
             version: candidate.version,
             url: artifact_url(&state, &candidate.storage_key)?,
             signature: signature.to_string(),
             notes: candidate.changelog_markdown,
             pub_date: published_at.to_rfc3339(),
+            update_ticket,
         };
         return Ok(Json(response).into_response());
     }
@@ -1114,14 +1114,6 @@ async fn installation_update_event(
     })?;
     let event_type =
         clean_update_event_type(&request.event_type).map_err(update_validation_error)?;
-    let from_version =
-        clean_optional_update_version(request.from_version.as_deref(), "from_version")?;
-    let to_version = clean_optional_update_version(request.to_version.as_deref(), "to_version")?;
-    let from_build_id =
-        clean_update_failure_code(request.from_build_id.as_deref(), "from_build_id")
-            .map_err(update_validation_error)?;
-    let to_build_id = clean_update_failure_code(request.to_build_id.as_deref(), "to_build_id")
-        .map_err(update_validation_error)?;
     let failure_code = clean_update_failure_code(request.failure_code.as_deref(), "failure_code")
         .map_err(update_validation_error)?;
     let failure_class =
@@ -1136,13 +1128,8 @@ async fn installation_update_event(
             event_id,
             customer_id,
             installation_id,
-            campaign_id: request.campaign_id,
-            release_id: request.release_id,
+            update_ticket: request.update_ticket,
             event_type: &event_type,
-            from_version: from_version.as_deref(),
-            from_build_id: from_build_id.as_deref(),
-            to_version: to_version.as_deref(),
-            to_build_id: to_build_id.as_deref(),
             failure_code: failure_code.as_deref(),
             failure_class: failure_class.as_deref(),
             occurred_at,

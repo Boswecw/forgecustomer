@@ -15,6 +15,7 @@ declare
   v_auth_user_id uuid := '00000000-0000-4000-8000-000000000911';
   v_fleet_id uuid := '00000000-0000-4000-8000-000000000902';
   v_installation_id uuid := '00000000-0000-4000-8000-000000000903';
+  v_other_installation_id uuid := '00000000-0000-4000-8000-000000000907';
   v_release_id uuid := '00000000-0000-4000-8000-000000000904';
   v_artifact_id uuid := '00000000-0000-4000-8000-000000000905';
   v_campaign_id uuid := '00000000-0000-4000-8000-000000000906';
@@ -47,6 +48,13 @@ begin
       (v_installation_id, v_customer_id, 'http-update-smoke-install', v_product_id,
        '1.0.0', '20260612.previous', 'active', v_fleet_id, 'linux', 'x86_64',
        'appimage', '1.0.0');
+
+  insert into public.installations
+      (id, customer_id, install_key, product_id, app_version, status, fleet_id,
+       platform, architecture, package_format, updater_version)
+  values
+      (v_other_installation_id, v_customer_id, 'http-update-smoke-other-install', v_product_id,
+       '1.0.0', 'active', v_fleet_id, 'linux', 'x86_64', 'appimage', '1.0.0');
 
   insert into public.product_releases
       (id, product_id, version, build_id, release_channel_id, status,

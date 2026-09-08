@@ -208,9 +208,12 @@ See `docs/LICENSING.md` for the full rules. Summary of the live endpoints:
   every campaign gate passes: active fleet/application, published release, validated
   artifact, matching channel/ring/platform/package, no hold, version gates, and the
   server-side HMAC rollout bucket. An eligible update returns exactly
-  `{ version, url, signature, notes, pub_date }`.
+  `{ version, url, signature, notes, pub_date, update_ticket }`. `update_ticket` is an
+  opaque, short-lived server-side correlation handle; it contains no campaign or release ID.
 - `POST /v1/installations/{id}/update-events` records minimal update outcomes with the
-  event UUID in `Idempotency-Key`. Unknown body fields are rejected; raw diagnostics,
+  event UUID in `Idempotency-Key` and the eligible response's `update_ticket`. The server
+  resolves campaign/release IDs from that ticket and rejects expired, invalid, and
+  cross-installation tickets. Unknown body fields, campaign/release IDs, raw diagnostics,
   paths, hostnames, logs, and arbitrary client strings are not accepted.
 
 ## Entitlements: snapshots, checks, offline leases

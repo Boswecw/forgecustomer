@@ -16,6 +16,7 @@ ROLLOUT_SECRET="${UPDATE_ROLLOUT_SECRET:-update-http-smoke-rollout-secret}"
 
 AUTH_USER_ID="00000000-0000-4000-8000-000000000911"
 INSTALLATION_ID="00000000-0000-4000-8000-000000000903"
+OTHER_INSTALLATION_ID="00000000-0000-4000-8000-000000000907"
 RELEASE_ID="00000000-0000-4000-8000-000000000904"
 CAMPAIGN_ID="00000000-0000-4000-8000-000000000906"
 ARTIFACT_STORAGE_KEY="authorforge/http-smoke/authorforge-updater-linux-x86_64.appimage"
@@ -187,7 +188,64 @@ assert body["url"] == os.environ["EXPECTED_URL"], body
 assert body["signature"] == "ci-tauri-http-smoke-signature", body
 assert body["notes"] == "HTTP update smoke release notes", body
 assert body["pub_date"], body
+assert set(body) == {"version", "url", "signature", "notes", "pub_date", "update_ticket"}, body
+import uuid
+uuid.UUID(body["update_ticket"])
 PY
+
+update_ticket="$(python3 - "$body" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1]))["update_ticket"])
+PY
+)"
+
+record_outcome() {
+  local installation_id="$1"
+  local idempotency_key="$2"
+  local payload="$3"
+  local body_file="$4"
+
+  curl -sS \
+    -o "$body_file" \
+    -w "%{http_code}" \
+    -X POST \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    -H "Idempotency-Key: $idempotency_key" \
+    --data "$payload" \
+    "http://$SMOKE_HOST:$SMOKE_PORT/v1/installations/$installation_id/update-events"
+}
+
+event_body="$tmp_dir/event.json"
+event_payload="{\"update_ticket\":\"$update_ticket\",\"event_type\":\"downloaded\"}"
+status="$(record_outcome "$INSTALLATION_ID" "00000000-0000-4000-8000-000000000921" "$event_payload" "$event_body")"
+expect_status "ticket-bound update receipt" "200" "$status" "$event_body"
+python3 - "$event_body" <<'PY'
+import json
+import sys
+body = json.load(open(sys.argv[1]))
+assert body["event_type"] == "downloaded", body
+assert body["received"] is True, body
+PY
+
+status="$(record_outcome "$INSTALLATION_ID" "00000000-0000-4000-8000-000000000921" "$event_payload" "$event_body")"
+expect_status "idempotent ticket-bound receipt" "200" "$status" "$event_body"
+python3 - "$event_body" <<'PY'
+import json
+import sys
+assert json.load(open(sys.argv[1]))["received"] is False
+PY
+
+status="$(record_outcome "$INSTALLATION_ID" "00000000-0000-4000-8000-000000000922" "{\"update_ticket\":\"$update_ticket\",\"event_type\":\"downloaded\",\"campaign_id\":\"$CAMPAIGN_ID\"}" "$event_body")"
+expect_status "campaign ID body field rejected" "422" "$status" "$event_body"
+
+status="$(record_outcome "$OTHER_INSTALLATION_ID" "00000000-0000-4000-8000-000000000923" "$event_payload" "$event_body")"
+expect_status "cross-installation ticket rejected" "409" "$status" "$event_body"
+
+$PSQL_CMD -d "$DB_NAME" -c "update public.update_outcome_tickets set issued_at = now() - interval '2 seconds', expires_at = now() - interval '1 second' where token = '$update_ticket';" >/dev/null
+status="$(record_outcome "$INSTALLATION_ID" "00000000-0000-4000-8000-000000000924" "$event_payload" "$event_body")"
+expect_status "expired ticket rejected" "409" "$status" "$event_body"
 
 status="$(request_update "1.2.0" "20260612.previous" "1.0.0" "$body")"
 expect_status "same-version request" "204" "$status" "$body"

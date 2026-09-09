@@ -1,5 +1,8 @@
 # ForgeCustomer — Claude Code Context
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this
+repository.
+
 Authority for customer identity, commerce, licensing, entitlements, installations, devices, usage,
 and commercial audit for BDS products (first: AuthorForge). Rust + Axum, entry `api/src/main.rs`.
 
